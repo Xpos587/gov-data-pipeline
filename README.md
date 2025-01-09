@@ -163,4 +163,4 @@ brew install tesseract
 
 ## Лицензия
 
-Проект распространяется под лицензией MIT.
+Проект распространяется под лицензией [MIT](https://github.com/Xpos587/gov-data-pipeline?tab=MIT-1-ov-file).
