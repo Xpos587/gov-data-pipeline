@@ -95,6 +95,51 @@ class BaseHandler(ABC):
             logger.error(f"Ошибка при выполнении запроса к {url}: {e}")
             return None
 
+    async def post(
+        self,
+        url: str,
+        headers: Optional[Dict[str, str]] = None,
+        data: Any = None,
+        json: Any = None,
+        proxy: Optional[str] = None,
+        proxy_auth: Optional[aiohttp.BasicAuth] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        user_agent: Optional[str] = None,
+    ) -> Optional[bytes]:
+        """
+        Выполняет POST-запрос к указанному URL с возможностью настройки заголовков, передачи данных,
+        прокси, cookies и User-Agent.
+
+        Returns:
+            Optional[bytes]: Байты содержимого ответа, если запрос успешен, иначе None.
+        """
+        if not self.session:
+            raise RuntimeError(
+                "Сессия не инициализирована. Используйте 'async with' для управления контекстом."
+            )
+
+        combined_headers: Dict[str, str] = headers.copy() if headers else {}
+        if user_agent:
+            combined_headers["User-Agent"] = user_agent
+
+        try:
+            async with self.session.post(
+                url,
+                headers=combined_headers,
+                data=data,
+                json=json,
+                proxy=proxy,
+                proxy_auth=proxy_auth,
+                cookies=cookies,
+            ) as response:
+                response.raise_for_status()
+                content = await response.read()
+                logger.info(f"POST-запрос к {url} выполнен успешно: {response.status}")
+                return content
+        except aiohttp.ClientError as e:
+            logger.error(f"Ошибка POST-запроса к {url}: {e}")
+            return None
+
     @abstractmethod
     async def process(self, options: Dict[str, Any]) -> Optional[DataFrame]:
         """
@@ -107,4 +152,3 @@ class BaseHandler(ABC):
             Optional[DataFrame]: Обработанные данные или None.
         """
         pass
-

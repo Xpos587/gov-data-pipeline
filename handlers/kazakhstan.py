@@ -55,7 +55,7 @@ class KazakhstanHandler(BaseHandler):
             return None
 
         # Регулярное выражение для поиска ссылки на файл .xlsx
-        pattern: str = r"https://kgd\.gov\.kz/sites/default/files/pages/trois_na_\d{2}\.\d{2}\.\d{4}_goda_\.xlsx"
+        pattern: str = r"https://kgd\.gov\.kz/sites/default/files/pages.*?\.xlsx"
         match: Optional[Match[str]] = re.search(pattern, page_text)
 
         if not match:
