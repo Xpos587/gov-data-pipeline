@@ -14,9 +14,7 @@ dependencies:
       - xlsxwriter
       - openpyxl
       - python-docx
-      - pytesseract
       - paramiko
       - pyyaml
       - pillow
-      - black
-      - ruff
+      - openai

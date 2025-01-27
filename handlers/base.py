@@ -1,7 +1,7 @@
 import aiohttp
 import logging
 from types import TracebackType
-from typing import Optional, Dict, Type, Any
+from typing import Optional, Union, Dict, Type, Any
 from polars import DataFrame
 from abc import ABC, abstractmethod
 
@@ -99,19 +99,39 @@ class BaseHandler(ABC):
         self,
         url: str,
         headers: Optional[Dict[str, str]] = None,
-        data: Any = None,
-        json: Any = None,
+        data: Optional[Union[Dict[str, Any], aiohttp.FormData]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
         proxy: Optional[str] = None,
         proxy_auth: Optional[aiohttp.BasicAuth] = None,
         cookies: Optional[Dict[str, str]] = None,
         user_agent: Optional[str] = None,
     ) -> Optional[bytes]:
         """
-        Выполняет POST-запрос к указанному URL с возможностью настройки заголовков, передачи данных,
-        прокси, cookies и User-Agent.
+        Выполняет POST-запрос к указанному URL с возможностью настройки заголовков, данных, прокси, cookies и User-Agent.
+
+        Parameters:
+        -----------
+        url : str
+            URL для запроса.
+        headers : Optional[Dict[str, str]]
+            Заголовки HTTP-запроса.
+        data : Optional[Union[Dict[str, Any], aiohttp.FormData]]
+            Данные для отправки в теле запроса. Может быть словарем или aiohttp.FormData для multipart/form-data.
+        json_data : Optional[Dict[str, Any]]
+            Данные в формате JSON для отправки в теле запроса.
+        proxy : Optional[str]
+            URL прокси-сервера (например, 'http://proxy.example.com:8080').
+        proxy_auth : Optional[aiohttp.BasicAuth]
+            Объект авторизации для прокси-сервера.
+        cookies : Optional[Dict[str, str]]
+            Cookies для запроса.
+        user_agent : Optional[str]
+            Значение User-Agent для заголовков.
 
         Returns:
-            Optional[bytes]: Байты содержимого ответа, если запрос успешен, иначе None.
+        --------
+        Optional[bytes]
+            Байты содержимого ответа, если запрос успешен, иначе None.
         """
         if not self.session:
             raise RuntimeError(
@@ -127,7 +147,7 @@ class BaseHandler(ABC):
                 url,
                 headers=combined_headers,
                 data=data,
-                json=json,
+                json=json_data,
                 proxy=proxy,
                 proxy_auth=proxy_auth,
                 cookies=cookies,
@@ -137,7 +157,7 @@ class BaseHandler(ABC):
                 logger.info(f"POST-запрос к {url} выполнен успешно: {response.status}")
                 return content
         except aiohttp.ClientError as e:
-            logger.error(f"Ошибка POST-запроса к {url}: {e}")
+            logger.error(f"Ошибка при выполнении POST-запроса к {url}: {e}")
             return None
 
     @abstractmethod

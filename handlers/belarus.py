@@ -29,7 +29,6 @@ class BelarusHandler(BaseHandler):
         """
         page_url: str = "https://www.customs.gov.by/zashchita-prav-na-obekty-intellektualnoy-sobstvennosti"
 
-        headers = options.get("headers", {})
         proxy = options.get("proxy")
         proxy_auth = options.get("proxy_auth")
         user_agent = options.get("user_agent")
@@ -38,7 +37,6 @@ class BelarusHandler(BaseHandler):
 
         page_content: Optional[bytes] = await self.fetch(
             url=page_url,
-            headers=headers,
             proxy=proxy,
             proxy_auth=proxy_auth,
             user_agent=user_agent,

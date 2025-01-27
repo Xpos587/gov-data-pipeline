@@ -140,7 +140,6 @@ class KyrgyzstanHandler(BaseHandler):
         logger.info(f"Запрашиваем страницу с PDF: {page_url}")
         pdf_page = await self.fetch(
             url=page_url,
-            headers=options.get("headers"),
             proxy=options.get("proxy"),
             proxy_auth=options.get("proxy_auth"),
             user_agent=options.get("user_agent"),
@@ -171,7 +170,6 @@ class KyrgyzstanHandler(BaseHandler):
 
         pdf_content = await self.fetch(
             url=pdf_url,
-            headers=options.get("headers"),
             proxy=options.get("proxy"),
             proxy_auth=options.get("proxy_auth"),
             user_agent=options.get("user_agent"),
@@ -203,7 +201,13 @@ class KyrgyzstanHandler(BaseHandler):
 
         bearer = token_match.group(1)
         task_id = task_match.group(1)
+
         logger.info(f"Получен token: {bearer} и taskId: {task_id}")
+
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {bearer}",
+        }
 
         # 3. Загружаем PDF (upload) на ilovepdf
         form_data = aiohttp.FormData()
@@ -220,10 +224,7 @@ class KyrgyzstanHandler(BaseHandler):
         )
         upload_resp = await self.post(
             url="https://api85o.ilovepdf.com/v1/upload",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {bearer}",
-            },
+            headers=headers,
             data=form_data,
         )
         if not upload_resp:
@@ -240,10 +241,7 @@ class KyrgyzstanHandler(BaseHandler):
         # 4. Конвертируем PDF -> DOCX
         process_resp = await self.post(
             url="https://api85o.ilovepdf.com/v1/process",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {bearer}",
-            },
+            headers=headers,
             data={
                 "convert_to": "docx",
                 "output_filename": "{filename}",
@@ -271,10 +269,7 @@ class KyrgyzstanHandler(BaseHandler):
         # 5. Проверяем статус задачи
         status_content = await self.fetch(
             url=f"https://api85o.ilovepdf.com/v1/task/{task_id}",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {bearer}",
-            },
+            headers=headers,
             user_agent=options.get("user_agent"),
         )
         if not status_content:

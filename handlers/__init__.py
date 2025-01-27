@@ -29,14 +29,12 @@ class HandlerConfig:
         self,
         handler_class: Type[BaseHandler],
         user_agent: Optional[str] = None,
-        headers: Optional[Dict[str, str]] = None,
         proxy: Optional[str] = None,
         proxy_auth: Optional[aiohttp.BasicAuth] = None,
         enabled: bool = True,
     ):
         self.handler_class: Type[BaseHandler] = handler_class
         self.user_agent: Optional[str] = user_agent
-        self.headers: Dict[str, str] = headers or {}
         self.proxy: Optional[str] = proxy
         self.proxy_auth: Optional[aiohttp.BasicAuth] = proxy_auth
         self.enabled: bool = enabled
@@ -85,7 +83,6 @@ class HandlersManager:
                 logger.info(f"Запуск обработчика '{name}'...")
                 result = await handler.process(
                     {
-                        "headers": config.headers,
                         "proxy": config.proxy,
                         "proxy_auth": config.proxy_auth,
                         "user_agent": config.user_agent,
@@ -142,7 +139,6 @@ def load_configs_from_file(config_path: str) -> Dict[str, HandlerConfig]:
         configs[name] = HandlerConfig(
             handler_class=handler_class,
             user_agent=conf.get("user_agent"),
-            headers=conf.get("headers", {}),
             proxy=conf.get("proxy"),
             proxy_auth=proxy_auth,
             enabled=conf.get("enabled", True),
