@@ -1,13 +1,23 @@
+import yaml
+import logging
+from pathlib import Path
 from typing import Dict, Optional, Type
+from polars import DataFrame
+import aiohttp
+
 from .base import BaseHandler
 from .belarus import BelarusHandler
 from .kazakhstan import KazakhstanHandler
 from .kyrgyzstan import KyrgyzstanHandler
-from polars import DataFrame
-import aiohttp
-import logging
 
 logger = logging.getLogger(__name__)
+
+# Сопоставление строковых имен классов с реальными классами обработчиков
+HANDLER_CLASS_MAPPING: Dict[str, Type[BaseHandler]] = {
+    "BelarusHandler": BelarusHandler,
+    "KazakhstanHandler": KazakhstanHandler,
+    "KyrgyzstanHandler": KyrgyzstanHandler,
+}
 
 
 class HandlerConfig:
@@ -19,14 +29,12 @@ class HandlerConfig:
         self,
         handler_class: Type[BaseHandler],
         user_agent: Optional[str] = None,
-        headers: Optional[Dict[str, str]] = None,
         proxy: Optional[str] = None,
         proxy_auth: Optional[aiohttp.BasicAuth] = None,
         enabled: bool = True,
-    ) -> None:
+    ):
         self.handler_class: Type[BaseHandler] = handler_class
         self.user_agent: Optional[str] = user_agent
-        self.headers: Dict[str, str] = headers or {}
         self.proxy: Optional[str] = proxy
         self.proxy_auth: Optional[aiohttp.BasicAuth] = proxy_auth
         self.enabled: bool = enabled
@@ -52,7 +60,6 @@ class HandlersManager:
         Инициализация всех обработчиков из конфигураций.
         """
         handlers: Dict[str, BaseHandler] = {}
-
         for name, config in self.configs.items():
             if config.enabled:
                 handler_instance = config.handler_class()
@@ -60,7 +67,6 @@ class HandlersManager:
                 logger.info(f"Обработчик '{name}' инициализирован.")
             else:
                 logger.info(f"Обработчик '{name}' отключен.")
-
         return handlers
 
     async def process_all(self) -> Dict[str, Optional[DataFrame]]:
@@ -71,47 +77,81 @@ class HandlersManager:
             Dict[str, Optional[DataFrame]]: Результаты обработки для каждого обработчика.
         """
         results: Dict[str, Optional[DataFrame]] = {}
-
         for name, handler in self.handlers.items():
             config = self.configs[name]
             async with handler:
                 logger.info(f"Запуск обработчика '{name}'...")
-                result = await handler.process({
-                    "headers": config.headers,
-                    "proxy": config.proxy,
-                    "proxy_auth": config.proxy_auth,
-                    "user_agent": config.user_agent,
-                })
+                result = await handler.process(
+                    {
+                        "proxy": config.proxy,
+                        "proxy_auth": config.proxy_auth,
+                        "user_agent": config.user_agent,
+                    }
+                )
                 results[name] = result
                 logger.info(f"Обработчик '{name}' завершил работу.")
-
         return results
 
-# Конфигурация обработчиков
-configs: Dict[str, HandlerConfig] = {
-    "belarus": HandlerConfig(
-        handler_class=BelarusHandler,
-        user_agent="BelarusHandler/1.0",
-        headers={},
-        # proxy="http://proxy.example.com:8080",
-        # proxy_auth=aiohttp.BasicAuth("user", "pass"),
-        enabled=True,
-    ),
-    "kazakhstan": HandlerConfig(
-        handler_class=KazakhstanHandler,
-        user_agent="KazakhstanHandler/1.0",
-        headers={},
-        enabled=True,
-    ),
-    "kyrgyzstan": HandlerConfig(
-        handler_class=KyrgyzstanHandler,
-        user_agent="KyrgyzstanHandler/1.0",
-        headers={},
-        enabled=True,
-    ),
-}
 
-# Экземпляр менеджера обработчиков
-handlers_manager: HandlersManager = HandlersManager(configs)
+def load_configs_from_file(config_path: str) -> Dict[str, HandlerConfig]:
+    """
+    Загружает конфигурации обработчиков из YAML файла.
+
+    Args:
+        config_path (str): Путь к конфигурационному файлу.
+
+    Returns:
+        Dict[str, HandlerConfig]: Словарь конфигураций обработчиков.
+    """
+    with open(config_path, "r", encoding="utf-8") as file:
+        raw_config = yaml.safe_load(file)
+
+    if not raw_config or "handlers" not in raw_config:
+        raise ValueError(
+            "Конфигурационный файл пуст или не содержит секцию 'handlers'."
+        )
+
+    configs: Dict[str, HandlerConfig] = {}
+    for name, conf in raw_config["handlers"].items():
+        handler_class_name = conf.get("handler_class")
+        if not handler_class_name:
+            raise ValueError(
+                f"В конфигурации обработчика '{name}' не указано 'handler_class'."
+            )
+
+        handler_class = HANDLER_CLASS_MAPPING.get(handler_class_name)
+        if not handler_class:
+            raise ValueError(f"Неизвестный класс обработчика: {handler_class_name}")
+
+        # Обработка proxy_auth, если он указан
+        proxy_auth_config = conf.get("proxy_auth")
+        if proxy_auth_config and isinstance(proxy_auth_config, dict):
+            try:
+                proxy_auth = aiohttp.BasicAuth(**proxy_auth_config)
+            except TypeError as e:
+                logger.error(
+                    f"Неверная конфигурация proxy_auth для обработчика '{name}': {e}"
+                )
+                proxy_auth = None
+        else:
+            proxy_auth = None
+
+        configs[name] = HandlerConfig(
+            handler_class=handler_class,
+            user_agent=conf.get("user_agent"),
+            proxy=conf.get("proxy"),
+            proxy_auth=proxy_auth,
+            enabled=conf.get("enabled", True),
+        )
+    return configs
+
+
+# Загрузка конфигурации обработчиков
+CONFIG_FILE = Path(__file__).parent.parent / "config.yml"
+
+# Преобразуем Path в str
+configs = load_configs_from_file(str(CONFIG_FILE))
+
+handlers_manager = HandlersManager(configs)
 
 __all__ = ["handlers_manager"]

@@ -13,25 +13,30 @@ class SFTPConfig(BaseSettings):
     """Настройки SFTP сервера."""
 
     host: str = "127.0.0.1"
-    port: int = 21
+    port: int = 22
     user: str = "sftp"
-    passwd: SecretStr
+    passwd: SecretStr = SecretStr("default_pass")
     remote_dir: str = "/"
+
+    class Config:
+        env_prefix = "SFTP_"  # Префикс для переменных окружения
 
 
 class OpenAIConfig(BaseSettings):
     """Настройки OpenAI API."""
 
-    api_key: SecretStr
-    model: str = "gpt-4o-mini"
-    max_tokens: int = 768
+    base_url: str = "https://api.openai.com/v1"
+    api_key: SecretStr = SecretStr("default_key")
+
+    class Config:
+        env_prefix = "OPENAI_"  # Префикс для переменных окружения
 
 
 class AppSettings(BaseSettings):
     """Основные настройки приложения."""
 
-    openai: OpenAIConfig = Field(default=OpenAIConfig(api_key=SecretStr("default_key")))
-    sftp: SFTPConfig = Field(default=SFTPConfig(passwd=SecretStr("default_pass")))
+    openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
+    sftp: SFTPConfig = Field(default_factory=SFTPConfig)
 
 
 settings = AppSettings()

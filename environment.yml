@@ -10,11 +10,11 @@ dependencies:
       - pydantic
       - pydantic_settings
       - polars
-      - pdfplumber
       - xlsx2csv
       - xlsxwriter
       - openpyxl
-      - openai
-      - pytesseract
+      - python-docx
       - paramiko
+      - pyyaml
       - pillow
+      - openai

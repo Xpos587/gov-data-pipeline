@@ -1,57 +1,51 @@
 # Gov Data Pipeline
 
+Автоматизированная система для регулярного сбора и обработки данных из официальных таможенных реестров Беларуси, Казахстана и Киргизии.  
+Основная цель — еженедельное получение данных, преобразование их в унифицированный Excel-формат, анализ изображений (OCR/GPT) и корректировка текста с помощью LLM (GPT).
+
+---
+
 ## Описание проекта
 
-Этот проект автоматизирует сбор и обработку данных из официальных источников
-(Беларусь, Казахстан, Киргизия). Основная цель — еженедельное получение данных,
-их преобразование в унифицированный формат таблиц Excel, обработка изображений
-и корректировка текста с использованием LLM.
+1. **Беларусь**
+
+   - **URL для скачивания:** [https://www.customs.gov.by/zashchita-prav-na-obekty-intellektualnoy-sobstvennosti](https://www.customs.gov.by/zashchita-prav-na-obekty-intellektualnoy-sobstvennosti)
+   - Обработчик: `BelarusHandler`
+   - Особенности: поиск `.xlsx` файла по шаблонной ссылке, загрузка, базовая очистка.
+
+2. **Казахстан**
+
+   - **URL для скачивания:** [https://kgd.gov.kz/ru/content/tamozhennyy-reestr-obektov-intellektualnoy-sobstvennosti-1](https://kgd.gov.kz/ru/content/tamozhennyy-reestr-obektov-intellektualnoy-sobstvennosti-1)
+   - Обработчик: `KazakhstanHandler`
+   - Особенности:
+     - Предобработка изображений (конвертация в `data:image/png;base64,...`)
+     - Передача столбца с ТМ и описанием в GPT для распознавания брендов и корректировки.
+
+3. **Киргизия**
+   - **URL для скачивания:** [https://www.customs.gov.kg/article/get?id=46&lang=ru](https://www.customs.gov.kg/article/get?id=46&lang=ru)
+   - Обработчик: `KyrgyzstanHandler`
+   - Особенности: скачивание PDF, затем через сервис ilovepdf загрузка и конвертация в DOCX, после чего извлечение таблиц.
 
 ---
 
-## Основные задачи
+## Коррекция текста и GPT
 
-### Беларусь
-
-- **Скачивание данных**:  
-  [https://www.customs.gov.by/zashchita-prav-na-obekty-intellektualnoy-sobstvennosti](https://www.customs.gov.by/zashchita-prav-na-obekty-intellektualnoy-sobstvennosti).
-- Обработка таблиц и корректировка текста.
-
-**Примечание**: Обработка изображений для Беларуси не реализована из-за слишком
-неточного расположения изображений в исходных файлах.
-
-### Казахстан
-
-- **Скачивание данных**:  
-  [https://kgd.gov.kz/ru/content/tamozhennyy-reestr-obektov-intellektualnoy-sobstvennosti-1](https://kgd.gov.kz/ru/content/tamozhennyy-reestr-obektov-intellektualnoy-sobstvennosti-1).
-- Сбор изображений из таблиц, их конвертация в PNG и сохранение в формате:  
-  `data:image/png;base64,{base64_image}`
-- Конвертация base64 строк в текст с помощью OCR. Если текст отсутствует, строка
-  удаляется. Если текст есть, строка заменяется на распознанный текст.
-
-### Киргизия
-
-- **Скачивание данных**:  
-  [https://www.customs.gov.kg/article/get?id=46&lang=ru](https://www.customs.gov.kg/article/get?id=46&lang=ru).
-- Обработка данных в формате PDF не поддерживается.
-
----
-
-## Коррекция текста с использованием LLM
-
-Используется модель `gpt-4o-mini` для исправления текста, пострадавшего при
-конвертации (например, разрывы строк, опечатки). На текущий момент функционал
-реализован, но не подключен.
+1. **LLM (GPT) для исправления текста**
+   - Система использует модели GPT для устранения опечаток, разрывов строк и прочих искажений после конвертации.
+2. **OCR через GPT**
+   - В Казахстане, если встречаются изображения, они конвертируются в base64 и могут быть дополнительно интерпретированы GPT Vision (вместо классического Tesseract).
+3. **Генерация сэмплов ТМ**
+   - GPT может генерировать варианты написания ТМ на русском и английском языках.
 
 ---
 
 ## Ограничения
 
-1. **Python 3.12**: Код не тестировался на версиях ниже 3.12.
-2. **Изображения**:
-   - Проблемы с обработкой из-за различий в форматах (PNG, WFM, EFM).
-   - Неструктурированное расположение в файлах.
-3. **PDF**: Обработка для Киргизии отсутствует.
+1. [ ] **Python 3.12** — код не тестировался на более ранних версиях.
+2. [ ] **Изображения**:
+   - [x] Сложность из-за нестандартных форматов (WFM, EFM)
+   - [ ] Неструктурированное расположение в исходных Excel
+3. [x] **PDF** — обработка для Киргизии пока ограничена конвертацией (через ilovepdf), без глубокой OCR.
 
 ---
 
@@ -60,107 +54,80 @@
 ### Системные требования
 
 - **Python**: 3.12 или выше.
-- **Tesseract OCR**: Установите для работы с распознаванием текста.
-- **Зависимости**: Все указаны в `requirements.txt`.
+- **Зависимости**: перечислены в `environment.yml` или `requirements.txt`.
 
-### Установка Tesseract OCR
-
-#### Arch Linux
-
-```bash
-sudo pacman -S tesseract tesseract-data-eng tesseract-data-rus
-```
-
-#### Ubuntu/Debian
-
-```bash
-sudo apt update
-sudo apt install tesseract-ocr -y
-sudo apt install libtesseract-dev -y
-```
-
-#### macOS
-
-```bash
-brew install tesseract
-```
-
-#### Windows
-
-1. Скачайте [Tesseract-OCR](https://github.com/tesseract-ocr/tesseract).
-2. Убедитесь, что `tesseract.exe` находится в PATH.
-
----
-
-### Установка зависимостей
+### Установка зависимостей (через `requirements.txt`)
 
 1. Создайте виртуальное окружение:
 
    ```bash
    python -m venv venv
-   source venv/bin/activate  # Linux/Mac
-   venv\Scripts\activate     # Windows
+   source venv/bin/activate     # Linux/Mac
+   venv\Scripts\activate        # Windows
    ```
 
-2. Установите зависимости:
+2. Установите пакеты:
 
    ```bash
    pip install -r requirements.txt
    ```
 
+_(При желании можно использовать `environment.yml` вместе с Conda/Mamba.)_
+
 ---
 
 ## Настройка
 
-1. Склонируйте репозиторий:
+1. Клонируйте репозиторий:
 
    ```bash
    git clone https://github.com/Xpos587/gov-data-pipeline.git
    cd gov-data-pipeline
    ```
 
-2. Создайте файл `.env`:
+2. Создайте файл `.env` на базе `.env.dist`:
 
    ```bash
    cp .env.dist .env
    ```
 
-3. Укажите настройки в `.env`:
-   - **SFTP**: Для выгрузки обработанных файлов.
-   - **OpenAI API**: Получите API-ключ OpenAI здесь:  
-     [https://platform.openai.com/settings/organization/api-keys](https://platform.openai.com/settings/organization/api-keys).
+3. Укажите нужные параметры в `.env`:
+   - **SFTP**: параметры сервера, куда выгружаются итоговые Excel-файлы (`SFTP_HOST`, `SFTP_PORT`, `SFTP_USER` и т.д.).
+   - **OpenAI API**: для GPT (`OPENAI_BASE_URL`, `OPENAI_API_KEY`).
 
 ---
 
 ## Использование
 
-1. Убедитесь, что `.env` настроен.
-2. Запустите приложение:
+1. Убедитесь, что `.env` корректно заполнен (OpenAI и SFTP).
+2. Запустите `main.py`:
 
    ```bash
    python main.py
    ```
 
+3. Логи будут в консоли (на русском языке). При превышении лимитов (429) или ошибках аутентификации (401) скрипт повторит запросы автоматически.
+
 ---
 
 ## Архитектура проекта
 
-- **handlers**: Обработчики для Беларуси, Казахстана и Киргизии.
-- **utils**: Утилиты для OCR, логирования, загрузки через SFTP и работы с настройками.
-- **settings**: Конфигурация приложения.
-- **main.py**: Точка входа.
+- **handlers**
+  Включает классы для каждой страны (`BelarusHandler`, `KazakhstanHandler`, `KyrgyzstanHandler`).
+  Каждый хендлер умеет скачивать и преобразовывать данные.
 
----
+- **utils**
 
-## Возможные доработки
+  - **gpt.py**: функции для работы с GPT (распознавание брендов, корректировка строк, обработка изображений).
+  - **settings.py**: конфигурации SFTP и OpenAI.
+  - **sftp.py**: загрузка результатов на SFTP.
+  - **loggers**: настройки логирования.
 
-1. Поддержка обработки PDF для Киргизии.
-2. Улучшение работы с изображениями.
-3. Интеграция корректировки текста с использованием OpenAI.
-4. Оптимизация кода для повышения производительности.
+- **main.py**
+  Точка входа. Инициализирует все хендлеры, обрабатывает результаты, при необходимости выгружает на SFTP.
 
 ---
 
 ## Лицензия
 
-Проект распространяется под лицензией MIT.
+Проект распространяется под лицензией [MIT](LICENSE).

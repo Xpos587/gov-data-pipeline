@@ -21,8 +21,6 @@ async def main() -> None:
     """
     logger.info("Начало обработки...")
 
-    print(settings)
-
     if not settings.sftp:
         logger.error("Настройки SFTP не найдены. Завершаем работу.")
         return

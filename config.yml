@@ -1,0 +1,21 @@
+handlers:
+  belarus:
+    handler_class: BelarusHandler
+    user_agent: "BelarusHandler/1.0"
+    proxy: null
+    proxy_auth: null
+    enabled: false
+
+  kazakhstan:
+    handler_class: KazakhstanHandler
+    user_agent: "KazakhstanHandler/1.0"
+    proxy: null
+    proxy_auth: null
+    enabled: true
+
+  kyrgyzstan:
+    handler_class: KyrgyzstanHandler
+    user_agent: "KyrgyzstanHandler/1.0"
+    proxy: null
+    proxy_auth: null
+    enabled: false
