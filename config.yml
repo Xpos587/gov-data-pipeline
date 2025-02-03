@@ -4,6 +4,7 @@ handlers:
     user_agent: "BelarusHandler/1.0"
     proxy: null
     proxy_auth: null
+    correction: true
     enabled: false
 
   kazakhstan:
@@ -11,6 +12,7 @@ handlers:
     user_agent: "KazakhstanHandler/1.0"
     proxy: null
     proxy_auth: null
+    correction: false
     enabled: true
 
   kyrgyzstan:
@@ -18,4 +20,5 @@ handlers:
     user_agent: "KyrgyzstanHandler/1.0"
     proxy: null
     proxy_auth: null
+    correction: true
     enabled: false

@@ -17,6 +17,11 @@ class BaseHandler(ABC):
     Предоставляет общую асинхронную логику и структуру.
     """
 
+    IMAGE_COLUMN_NAME: str
+    TRADEMARK_COLUMN_NAME: str
+    DESCRIPTION_COLUMN_NAME: str
+    ROW_OFFSET: int = 0
+
     def __init__(self) -> None:
         self.session: Optional[aiohttp.ClientSession] = None
 
@@ -161,14 +166,30 @@ class BaseHandler(ABC):
             return None
 
     @abstractmethod
-    async def process(self, options: Dict[str, Any]) -> Optional[DataFrame]:
+    async def process(
+        self,
+        user_agent: str,
+        proxy: Optional[str] = None,
+        proxy_auth: Optional[aiohttp.BasicAuth] = None,
+        correction: bool = False,
+    ) -> Optional[DataFrame]:
         """
         Абстрактный метод, который должен быть реализован в дочерних классах.
 
-        Args:
-            options (Dict[str, Any]): Параметры для обработки данных.
+        Parameters
+        ----------
+        user_agent : Optional[str]
+            Заголовок User-Agent, если нужно.
+        proxy : Optional[str]
+            Адрес прокси-сервера.
+        proxy_auth : Optional[aiohttp.BasicAuth]
+            Учетные данные для прокси (логин/пароль).
+        correction : bool
+            Флаг включения/выключения коррекции.
 
-        Returns:
-            Optional[DataFrame]: Обработанные данные или None.
+        Returns
+        -------
+        Optional[DataFrame]
+            Обработанные данные (DataFrame) или None, если что-то пошло не так.
         """
         pass

@@ -1,23 +1,61 @@
+import aiohttp
 import yaml
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Type
+from typing import Dict, Optional, Type, Any
 from polars import DataFrame
-import aiohttp
+import pkgutil
+import importlib
+import inspect
 
 from .base import BaseHandler
-from .belarus import BelarusHandler
-from .kazakhstan import KazakhstanHandler
-from .kyrgyzstan import KyrgyzstanHandler
 
 logger = logging.getLogger(__name__)
 
-# Сопоставление строковых имен классов с реальными классами обработчиков
-HANDLER_CLASS_MAPPING: Dict[str, Type[BaseHandler]] = {
-    "BelarusHandler": BelarusHandler,
-    "KazakhstanHandler": KazakhstanHandler,
-    "KyrgyzstanHandler": KyrgyzstanHandler,
-}
+
+def load_handler_classes() -> Dict[str, Type[BaseHandler]]:
+    """
+    Динамически загружает все классы-наследники BaseHandler внутри пакета `handlers`.
+
+    Returns
+    -------
+    Dict[str, Type[BaseHandler]]
+        Словарь, где ключ — имя класса, а значение — сам класс.
+    """
+    handlers_dict: Dict[str, Type[BaseHandler]] = {}
+
+    # __path__ — специальная переменная модуля __init__.py,
+    # указывающая на директорию пакета
+    package_path = __path__
+    package_name = __package__  # например, "handlers"
+
+    for module_info in pkgutil.iter_modules(package_path):
+        # Пропускаем пакеты (ispkg==True), если они есть
+        if not module_info.ispkg:
+            module_name = module_info.name
+            full_module_name = f"{package_name}.{module_name}"
+
+            try:
+                # Импортируем модуль
+                module = importlib.import_module(full_module_name)
+            except ImportError as e:
+                logger.error(
+                    f"Не удалось импортировать модуль '{full_module_name}': {e}"
+                )
+                continue
+
+            # Перебираем все объекты внутри модуля
+            for name, obj in inspect.getmembers(module, inspect.isclass):
+                # Проверяем, является ли obj наследником BaseHandler (и не самим BaseHandler)
+                if issubclass(obj, BaseHandler) and obj is not BaseHandler:
+                    handlers_dict[name] = obj
+                    logger.debug(f"Найден обработчик: {name}")
+
+    return handlers_dict
+
+
+# Динамическое сопоставление
+HANDLER_CLASS_MAPPING: Dict[str, Type[BaseHandler]] = load_handler_classes()
 
 
 class HandlerConfig:
@@ -28,16 +66,18 @@ class HandlerConfig:
     def __init__(
         self,
         handler_class: Type[BaseHandler],
-        user_agent: Optional[str] = None,
+        user_agent: str = "DefaultUserAgent",
         proxy: Optional[str] = None,
         proxy_auth: Optional[aiohttp.BasicAuth] = None,
         enabled: bool = True,
-    ):
+        correction: bool = False,
+    ) -> None:
         self.handler_class: Type[BaseHandler] = handler_class
-        self.user_agent: Optional[str] = user_agent
+        self.user_agent: str = user_agent
         self.proxy: Optional[str] = proxy
         self.proxy_auth: Optional[aiohttp.BasicAuth] = proxy_auth
         self.enabled: bool = enabled
+        self.correction: bool = correction
 
 
 class HandlersManager:
@@ -62,9 +102,12 @@ class HandlersManager:
         handlers: Dict[str, BaseHandler] = {}
         for name, config in self.configs.items():
             if config.enabled:
-                handler_instance = config.handler_class()
-                handlers[name] = handler_instance
-                logger.info(f"Обработчик '{name}' инициализирован.")
+                try:
+                    handler_instance = config.handler_class()
+                    handlers[name] = handler_instance
+                    logger.info(f"Обработчик '{name}' инициализирован.")
+                except Exception as e:
+                    logger.error(f"Ошибка при инициализации обработчика '{name}': {e}")
             else:
                 logger.info(f"Обработчик '{name}' отключен.")
         return handlers
@@ -81,15 +124,18 @@ class HandlersManager:
             config = self.configs[name]
             async with handler:
                 logger.info(f"Запуск обработчика '{name}'...")
-                result = await handler.process(
-                    {
-                        "proxy": config.proxy,
-                        "proxy_auth": config.proxy_auth,
-                        "user_agent": config.user_agent,
-                    }
-                )
-                results[name] = result
-                logger.info(f"Обработчик '{name}' завершил работу.")
+                try:
+                    df_result: Optional[DataFrame] = await handler.process(
+                        user_agent=config.user_agent,
+                        proxy=config.proxy,
+                        proxy_auth=config.proxy_auth,
+                        correction=config.correction,
+                    )
+                    results[name] = df_result
+                    logger.info(f"Обработчик '{name}' завершил работу.")
+                except Exception as e:
+                    logger.error(f"Ошибка в обработчике '{name}': {e}")
+                    results[name] = None
         return results
 
 
@@ -103,8 +149,15 @@ def load_configs_from_file(config_path: str) -> Dict[str, HandlerConfig]:
     Returns:
         Dict[str, HandlerConfig]: Словарь конфигураций обработчиков.
     """
-    with open(config_path, "r", encoding="utf-8") as file:
-        raw_config = yaml.safe_load(file)
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            raw_config: Dict[str, Any] = yaml.safe_load(file)
+    except FileNotFoundError:
+        logger.error(f"Файл конфигурации не найден: {config_path}")
+        raise
+    except yaml.YAMLError as e:
+        logger.error(f"Ошибка при разборе YAML файла: {e}")
+        raise
 
     if not raw_config or "handlers" not in raw_config:
         raise ValueError(
@@ -123,26 +176,45 @@ def load_configs_from_file(config_path: str) -> Dict[str, HandlerConfig]:
         if not handler_class:
             raise ValueError(f"Неизвестный класс обработчика: {handler_class_name}")
 
-        # Обработка proxy_auth, если он указан
-        proxy_auth_config = conf.get("proxy_auth")
-        if proxy_auth_config and isinstance(proxy_auth_config, dict):
-            try:
-                proxy_auth = aiohttp.BasicAuth(**proxy_auth_config)
-            except TypeError as e:
-                logger.error(
-                    f"Неверная конфигурация proxy_auth для обработчика '{name}': {e}"
-                )
-                proxy_auth = None
-        else:
-            proxy_auth = None
+        # Обработка proxy_auth
+        proxy_auth_config: Optional[Dict[str, str]] = conf.get("proxy_auth")
+        proxy_auth: Optional[str] = None
+        if isinstance(proxy_auth_config, dict):
+            login: str = proxy_auth_config.get("login", "")
+            password: str = proxy_auth_config.get("password", "")
+            if login and password:
+                proxy_auth = f"{login}:{password}"
+
+        # Обработка user_agent, если он не указан, устанавливаем значение по умолчанию
+        user_agent = conf.get("user_agent")
+        if not isinstance(user_agent, str):
+            logger.warning(
+                f"user_agent для обработчика '{name}' должен быть строкой. Используется значение по умолчанию."
+            )
+            user_agent = "DefaultUserAgent"
+
+        # Обработка enabled и correction с типом bool
+        enabled = bool(conf.get("enabled", True))
+        correction = bool(conf.get("correction", False))
+
+        # Обработка proxy, если она указана
+        proxy = conf.get("proxy")
+        if proxy is not None and not isinstance(proxy, str):
+            logger.warning(
+                f"proxy для обработчика '{name}' должен быть строкой. Игнорируется."
+            )
+            proxy = None
 
         configs[name] = HandlerConfig(
             handler_class=handler_class,
-            user_agent=conf.get("user_agent"),
-            proxy=conf.get("proxy"),
+            user_agent=user_agent,
+            proxy=proxy,
             proxy_auth=proxy_auth,
-            enabled=conf.get("enabled", True),
+            enabled=enabled,
+            correction=correction,
         )
+        logger.debug(f"Загружена конфигурация для обработчика '{name}'.")
+
     return configs
 
 

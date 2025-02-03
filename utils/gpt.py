@@ -5,12 +5,14 @@ import base64
 import json
 import logging
 import asyncio
+import unicodedata
 from io import BytesIO
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, cast
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import completion_create_params
 from openai import RateLimitError, AuthenticationError, APIError
 from pydantic import BaseModel, Field
 from utils.settings import settings
@@ -44,13 +46,13 @@ class RowCorrectionResponse(BaseModel):
 
 def is_excluded(row_text: str) -> bool:
     """
-    Проверяет, содержит ли вся строка ключевые слова "исключён" или "исключен".
-    Учитывает вариации букв "е" и "ё".
+    Проверяет, содержит ли строка ключевые слова "исключён" или "исключен".
+    Игнорирует регистр и пробелы.
     """
-    # Нормализуем текст: заменяем "ё" на "е", приводим к нижнему регистру
-    normalized_text = row_text.lower().replace("ё", "е")
-    # Ищем слово "исключен" как отдельное слово
-    return bool(re.search(r"\bисключен\b", normalized_text))
+    # Нормализуем текст: удаляем пробелы, заменяем "ё" на "е", приводим к нижнему регистру
+    normalized_text = re.sub(r"\s+", "", row_text)  # Удаление всех пробелов
+    normalized_text = normalized_text.casefold().replace("ё", "е")
+    return "исключен" in normalized_text
 
 
 async def image_to_base64(image_data: bytes) -> str:
@@ -72,6 +74,65 @@ async def image_to_base64(image_data: bytes) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def clean_messages(
+    messages: List[ChatCompletionMessageParam],
+) -> List[ChatCompletionMessageParam]:
+    """
+    Очищает содержимое сообщений от нежелательных Unicode-символов.
+
+    Если значение ключа "content" — строка, удаляются все контрольные символы и нормализуются пробелы.
+    Если значение — список (например, для GPT Vision), то для каждого элемента,
+    если он представляет собой словарь с ключом "text", также очищается текст.
+    """
+    cleaned: List[ChatCompletionMessageParam] = []
+
+    for msg in messages:
+        # Создаём копию сообщения
+        new_msg: Dict[str, Any] = dict(msg)
+
+        content: Any = new_msg.get("content", None)
+
+        if isinstance(content, str):
+            # Удаляем контрольные символы (категория "C")
+            cleaned_text = "".join(
+                ch for ch in content if unicodedata.category(ch)[0] != "C"
+            )
+            # Нормализуем пробелы
+            cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
+            new_msg["content"] = cleaned_text
+
+        elif isinstance(content, list):
+            # Явно указываем, что content — это список неизвестных объектов
+            content_list: List[Any] = cast(List[Any], content)
+            new_content: List[Any] = []
+            for item in content_list:
+                if isinstance(item, dict) and "text" in item:
+                    # Приводим item к dict[str, Any]
+                    item_dict: Dict[str, Any] = cast(Dict[str, Any], item)
+                    text_val: str = str(item_dict.get("text", ""))
+
+                    # Удаляем контрольные символы и нормализуем пробелы
+                    text_val = "".join(
+                        ch for ch in text_val if unicodedata.category(ch)[0] != "C"
+                    )
+                    text_val = re.sub(r"\s+", " ", text_val).strip()
+
+                    # Создаём копию, чтобы изменить только "text"
+                    new_item: Dict[str, Any] = {}
+                    for key_item, val_item in item_dict.items():
+                        new_item[key_item] = val_item
+                    new_item["text"] = text_val
+                    new_content.append(new_item)
+                else:
+                    new_content.append(item)
+
+            new_msg["content"] = new_content
+
+        cleaned.append(cast(ChatCompletionMessageParam, new_msg))
+
+    return cleaned
+
+
 async def call_openai(
     client: AsyncOpenAI,
     model: str,
@@ -80,23 +141,31 @@ async def call_openai(
     initial_delay: float = 2,
     temperature: float = 0.1,
     max_tokens: int = 64,
-    **kwargs: Any,
+    response_format: completion_create_params.ResponseFormat = {"type": "text"},
 ) -> ChatCompletion:
     """
-    Универсальная функция для вызова OpenAI ChatCompletion с повторными попытками
-    при возникновении RateLimitError (429), AuthenticationError (401) и других API-ошибках.
+    Универсальная функция для вызова OpenAI ChatCompletion с повторными попытками при возникновении
+    RateLimitError (429), AuthenticationError (401) и других API-ошибках.
 
-    Аргументы:
-      - client: Экземпляр AsyncOpenAI.
-      - model: Название модели.
-      - messages: Список сообщений (role, content).
-      - max_retries: Максимальное число повторов при ошибках.
-      - initial_delay: Начальная задержка перед повтором (сек).
-      - temperature, max_tokens: Параметры генерации ответа.
-      - kwargs: Прочие параметры, передаваемые в create().
+    Дополнительно очищает содержимое сообщений от контрольных символов и лишних пробелов,
+    чтобы в GPT никогда не попадали "грязные" Unicode-символы.
 
-    Возвращает ответ (response), либо выбрасывает исключение при неудаче.
+    Args:
+        client (AsyncOpenAI): Клиент OpenAI.
+        model (str): Название модели для запроса.
+        messages (List[ChatCompletionMessageParam]): Список сообщений для модели.
+        max_retries (int): Максимальное число попыток.
+        initial_delay (float): Начальная задержка перед повторной попыткой.
+        temperature (float): Параметр температуры.
+        max_tokens (int): Максимальное число токенов в ответе.
+        response_format (completion_create_params.ResponseFormat): Формат ответа.
+
+    Returns:
+        ChatCompletion: Ответ от OpenAI Chat API.
     """
+    # Очищаем сообщения перед отправкой запроса
+    messages = clean_messages(messages)
+
     delay: float = initial_delay
     for attempt in range(1, max_retries + 1):
         try:
@@ -105,23 +174,30 @@ async def call_openai(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                **kwargs,
+                response_format=response_format,
             )
+
+            # Логируем токены
+            usage = response.usage
+            if usage:
+                logger.info(
+                    f"[Модель {model}] Использованные токены: "
+                    f"prompt_tokens={usage.prompt_tokens}, "
+                    f"completion_tokens={usage.completion_tokens}, "
+                    f"total_tokens={usage.total_tokens}"
+                )
+
             return response
-        except RateLimitError:
+        except (RateLimitError, AuthenticationError) as err:
             if attempt < max_retries:
                 logger.warning(
-                    f"Превышен лимит (429). Попытка {attempt}/{max_retries}. "
-                    f"Повтор через {delay} сек..."
+                    f"Ошибка {err.__class__.__name__}. Попытка {attempt}/{max_retries}. Повтор через {delay} сек..."
                 )
                 await asyncio.sleep(delay)
                 delay *= 2
             else:
-                logger.error("Превышен лимит. Достигнуто макс. попыток!")
+                logger.error("Достигнуто максимальное число повторов!")
                 raise
-        except AuthenticationError:
-            logger.error("Ошибка аутентификации (401). Проверьте API ключ!")
-            raise
         except APIError as err:
             logger.error(f"API Ошибка: {err}. Попытка {attempt}/{max_retries}.")
             if attempt < max_retries:
@@ -131,12 +207,14 @@ async def call_openai(
                 logger.error("Достигнут максимум попыток API.")
                 raise
 
-    # Если цикл завершился без успешного возврата, выбрасываем исключение
-    raise RuntimeError("Не удалось получить ответ от OpenAI после всех попыток.")
+    raise RuntimeError("Не удалось получить ответ.")
 
 
 async def process_table(
-    df: pl.DataFrame, brand_column: str, description_column: Optional[str] = None
+    df: pl.DataFrame,
+    brand_column: str,
+    description_column: Optional[str] = None,
+    correction: bool = False,
 ) -> pl.DataFrame:
     """
     Обрабатывает DataFrame, распознаёт бренды и корректирует каждую строку.
@@ -163,18 +241,61 @@ async def process_table(
     )
 
     brand_system_prompt = (
-        "Identify the brand name in the input data. "
+        "Analyze the input text to identify brand names, product names, or any potential trademark-like terms. "
+        "Provide multiple variations of the identified names, including:\n"
+        "- The most likely correct spelling\n"
+        "- Russian transliteration\n"
+        "- English transliteration\n"
+        "- Common alternative spellings\n"
+        "- Additional variations if uncertain\n"
+        "\n"
+        "**Guidelines:**\n"
+        "- If the input contains a recognizable brand or product name, extract it.\n"
+        "- If not 100% sure, still include possible brand-like terms.\n"
+        "- Always return multiple variations (max 6 per language).\n"
+        "- Ensure both Russian and English versions are included.\n"
+        "- Avoid empty arrays—if unsure, provide the most plausible brand-like terms.\n"
+        "- Normalize spacing and remove unnecessary formatting.\n"
+        "- Strictly return JSON in the required schema with no extra text.\n"
+        "\n"
+        "**Example responses:**\n"
+        "\n"
+        "For input: 'Найки'\n"
+        "{\n"
+        '    "original_text": "Найки",\n'
+        '    "english_samples": ["Nike", "Naiki", "NIKE", "Naykee"],\n'
+        '    "russian_samples": ["Найки", "Найк"]\n'
+        "}\n"
+        "\n"
+        "For input: 'Адидас спорт'\n"
+        "{\n"
+        '    "original_text": "Адидас спорт",\n'
+        '    "english_samples": ["Adidas", "Adidas Sport"],\n'
+        '    "russian_samples": ["Адидас", "Адидас Спорт"]\n'
+        "}\n"
+        "\n"
+        "For input: 'Samsung Electronics Co., Ltd.'\n"
+        "{\n"
+        '    "original_text": "Samsung Electronics Co., Ltd.",\n'
+        '    "english_samples": ["Samsung", "Samsung Electronics"],\n'
+        '    "russian_samples": ["Самсунг", "Самсунг Электроникс"]\n'
+        "}\n"
+        "\n"
+        "For input: 'ООО Рога и Копыта'\n"
+        "{\n"
+        '    "original_text": "ООО Рога и Копыта",\n'
+        '    "english_samples": ["Roga i Kopyta LLC"],\n'
+        '    "russian_samples": ["Рога и Копыта"]\n'
+        "}\n"
+        "\n"
         "Respond strictly in JSON format following the provided schema. "
-        "For each brand, provide no more than 6 items in the following categories:\n"
-        "- Brand name samples in English.\n"
-        "- Brand name samples in Russian.\n"
-        "Ensure that each list contains no more than 6 items.\n"
-        "JSON schema: "
-        f"{json.dumps(BrandRecognitionResponse.model_json_schema(), indent=2)}"
+        f"You MUST return ONLY valid JSON with the following schema:\n"
+        f"{json.dumps(BrandRecognitionResponse.model_json_schema(), indent=2)}\n"
+        "No markdown fences. No extra text. Strictly output valid JSON or return an empty JSON object."
     )
 
     row_system_prompt: str = (
-        "Correct the table row. Respond strictly in JSON format with the key 'corrected_row' following the provided schema: "
+        "Correct the table row. Respond strictly in JSON format with the key 'corrected_row' following the provided schema:\n"
         f"{json.dumps(RowCorrectionResponse.model_json_schema(), indent=2)}"
     )
 
@@ -210,7 +331,7 @@ async def process_table(
         return response.choices[0].message.content or ""
 
     async def recognize_brand(
-        text: str, description: Optional[str] = None
+        text: str, description: Optional[str] = None, row_idx: int = 0
     ) -> BrandRecognitionResponse:
         """
         Распознаёт бренд, возвращая структуру BrandRecognitionResponse.
@@ -228,9 +349,18 @@ async def process_table(
 
         # Если описание присутствует, добавляем его
         if description:
-            text = f"{description} {text}"
+            text = f"{text}. Description: {description}"
 
-        logger.debug(f"Запрос: {text}")
+        # Убираем все цифры и нормализуем пробелы
+        text = re.sub(r"\d+", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Ограничиваем длину текста для GPT
+        max_length = 2000
+        if len(text) > max_length:
+            text = text[:max_length] + "..."
+
+        logger.info(f"Запрос (Строка {row_idx}): {text}")
 
         response = await call_openai(
             client,
@@ -245,10 +375,31 @@ async def process_table(
         )
 
         raw_text: str = response.choices[0].message.content or ""
-        logger.debug(f"Ответ: {raw_text}")
+        logger.info(f"Ответ (Строка {row_idx}): {raw_text}")
 
-        # Парсим ответ в модель BrandRecognitionResponse
-        return BrandRecognitionResponse.model_validate_json(raw_text)
+        # Обрабатываем JSON-ответ
+        try:
+            data = json.loads(raw_text)
+
+            if "english_samples" not in data:
+                logger.warning(
+                    f"[Строка {row_idx}] 'english_samples' отсутствует в ответе!"
+                )
+                data["english_samples"] = []
+            if "russian_samples" not in data:
+                logger.warning(
+                    f"[Строка {row_idx}] 'russian_samples' отсутствует в ответе!"
+                )
+                data["russian_samples"] = []
+
+            return BrandRecognitionResponse.model_validate(data)
+
+        except Exception as e:
+            logger.error(f"[Строка {row_idx}] Ошибка обработки JSON-ответа: {e}")
+            logger.error(f"[Строка {row_idx}] Некорректный ответ: {raw_text}")
+            return BrandRecognitionResponse(
+                english_samples=[], russian_samples=[], original_text=text
+            )
 
     async def correct_row(row_data: Dict[str, Optional[str]]) -> RowCorrectionResponse:
         """
@@ -267,7 +418,7 @@ async def process_table(
                 },
             ],
             temperature=0.2,
-            max_tokens=1024,
+            max_tokens=384,
             response_format={"type": "json_object"},
         )
 
@@ -288,33 +439,28 @@ async def process_table(
     # Перебираем строки DataFrame
     for idx, row in enumerate(df.iter_rows(named=True), start=1):
         row_dict: Dict[str, Optional[str]] = dict(row)
-        logger.debug(f"=== Обрабатываем строку {idx}: {row_dict}")
+        logger.info(f"=== Обрабатываем строку {idx}: {row_dict}")
 
-        # 1) Проверяем, исключена ли ТМ, анализируя ВСЮ строку
+        # 1) Проверяем, исключена ли ТМ (анализируем всю строку)
         combined_text = " ".join(
             str(val) for val in row_dict.values() if val is not None
         )
         if is_excluded(combined_text):
-            logger.info(
-                f"Строка {idx}: обнаружено ключевое слово 'исключён'. Пропускаем распознавание бренда."
-            )
-            # Добавляем 'Исключено' со значением 'Да'
+            logger.info(f"[Строка {idx}] Исключена (содержит 'исключён'). Пропускаем.")
             row_dict["Исключено"] = "Да"
-            # Удаляем другие возможные лишние поля, если необходимо
-            # Преобразуем row_dict в плоский словарь
-            flat_row = {k: (v or "") for k, v in row_dict.items()}
-            processed_rows.append(flat_row)
-            continue
+            processed_rows.append({k: (v or "") for k, v in row_dict.items()})
+            continue  # 🚀 Теперь строка точно пропускается без вызова GPT!
 
-        # 2) Если не исключена, обрабатываем только столбец brand_column и описание (если есть)
+        # 2) Обрабатываем только столбец brand_column (если не исключено)
         brand_val = row_dict.get(brand_column)
         description_val = (
             row_dict.get(description_column) if description_column else None
         )
 
         if isinstance(brand_val, str) and brand_val.strip():
-            brand_resp = await recognize_brand(brand_val, description_val)
-            # Сформируем итоговую строку (original + english + russian)
+            brand_resp = await recognize_brand(brand_val, description_val, row_idx=idx)
+
+            # Формируем итоговое значение
             combined_brand_info = " ".join(
                 [
                     brand_resp.original_text,
@@ -324,12 +470,19 @@ async def process_table(
             ).strip()
             row_dict[brand_column] = combined_brand_info
 
-        # 3) Добавляем 'Исключено' со значением 'Нет'
+        # 3) Добавляем 'Исключено' = 'Нет'
         row_dict["Исключено"] = "Нет"
 
-        # 4) Корректируем строку
-        corrected_resp = await correct_row(row_dict)
-        # Добавляем исправленную строку
-        processed_rows.append(corrected_resp.corrected_row)
+        # 4) Коррекция строки (если включена)
+        if correction:
+            try:
+                corrected_resp = await correct_row(row_dict)
+                processed_rows.append(corrected_resp.corrected_row)
+            except Exception as e:
+                logger.error(f"[Строка {idx}] Ошибка при корректировке: {e}")
+                logger.error(f"[Строка {idx}] Данные перед корректировкой: {row_dict}")
+                processed_rows.append({k: str(v or "") for k, v in row_dict.items()})
+        else:
+            processed_rows.append({k: str(v or "") for k, v in row_dict.items()})
 
     return pl.DataFrame(processed_rows)
