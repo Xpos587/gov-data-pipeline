@@ -134,15 +134,31 @@ class KyrgyzstanHandler(BaseHandler):
       5. Возвращает байты DOCX.
     """
 
-    async def retrieve(self, options: Dict[str, Any]) -> Optional[bytes]:
+    async def retrieve(
+        self,
+        user_agent: Optional[str],
+        proxy: Optional[str] = None,
+        proxy_auth: Optional[aiohttp.BasicAuth] = None,
+    ) -> Optional[bytes]:
+        """
+        Загружает страницу, извлекает ссылку на файл с помощью регулярного выражения и возвращает содержимое файла.
+
+        Args:
+            user_agent (str): Заголовок User-Agent.
+            proxy (Optional[str]): URL прокси-сервера.
+            proxy_auth (Optional[aiohttp.BasicAuth]): Учетные данные для прокси.
+
+        Returns:
+            Optional[bytes]: Содержимое файла в байтах, если файл найден и доступен, иначе None.
+        """
         # 1. Скачиваем PDF с сайта Киргизии
         page_url: str = "https://www.customs.gov.kg/article/get?id=46&lang=ru"
         logger.info(f"Запрашиваем страницу с PDF: {page_url}")
         pdf_page = await self.fetch(
             url=page_url,
-            proxy=options.get("proxy"),
-            proxy_auth=options.get("proxy_auth"),
-            user_agent=options.get("user_agent"),
+            proxy=proxy,
+            proxy_auth=proxy_auth,
+            user_agent=user_agent,
         )
         if not pdf_page:
             logger.error("Не удалось загрузить страницу с PDF.")
@@ -170,9 +186,9 @@ class KyrgyzstanHandler(BaseHandler):
 
         pdf_content = await self.fetch(
             url=pdf_url,
-            proxy=options.get("proxy"),
-            proxy_auth=options.get("proxy_auth"),
-            user_agent=options.get("user_agent"),
+            proxy=proxy,
+            proxy_auth=proxy_auth,
+            user_agent=user_agent,
         )
 
         if not pdf_content:
@@ -270,7 +286,7 @@ class KyrgyzstanHandler(BaseHandler):
         status_content = await self.fetch(
             url=f"https://api85o.ilovepdf.com/v1/task/{task_id}",
             headers=headers,
-            user_agent=options.get("user_agent"),
+            user_agent=user_agent,
         )
         if not status_content:
             logger.error("Ошибка получения статуса задачи.")
@@ -288,7 +304,7 @@ class KyrgyzstanHandler(BaseHandler):
         # 6. Скачиваем DOCX и возвращаем его байты
         docx_data = await self.fetch(
             url=f"https://api85o.ilovepdf.com/v1/download/{task_id}",
-            user_agent=options.get("user_agent"),
+            user_agent=user_agent,
         )
         if not docx_data:
             logger.error("Не удалось скачать DOCX.")
@@ -297,11 +313,26 @@ class KyrgyzstanHandler(BaseHandler):
         logger.info(f"DOCX успешно загружен, размер: {len(docx_data)} байт")
         return docx_data
 
-    async def process(self, options: Dict[str, Any]) -> Optional[DataFrame]:
+    async def process(
+        self,
+        user_agent: str,
+        proxy: Optional[str] = None,
+        proxy_auth: Optional[aiohttp.BasicAuth] = None,
+        correction: bool = False,
+    ) -> Optional[DataFrame]:
         """
-        Скачивает PDF, конвертирует его в DOCX, извлекает таблицы и формирует Polars DataFrame.
+        Получает последний доступный файл и обрабатывает его с помощью polars.
+
+        Args:
+            user_agent (str): Заголовок User-Agent.
+            proxy (Optional[str]): URL прокси-сервера.
+            proxy_auth (Optional[aiohttp.BasicAuth]): Учетные данные для прокси.
+            correction (bool): Флаг включения/выключения коррекции.
+
+        Returns:
+            Optional[DataFrame]: DataFrame с данными из файла, если файл найден и обработан успешно, иначе None.
         """
-        docx_bytes = await self.retrieve(options)
+        docx_bytes = await self.retrieve(user_agent, proxy, proxy_auth)
         if not docx_bytes:
             logger.error("DOCX не получен, прерываем обработку.")
             return None

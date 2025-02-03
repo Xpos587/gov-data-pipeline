@@ -10,7 +10,7 @@ dependencies:
       - pydantic
       - pydantic_settings
       - polars
-      - xlsx2csv
+      - fastexcel
       - xlsxwriter
       - openpyxl
       - python-docx

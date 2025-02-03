@@ -1,6 +1,7 @@
 import logging
 import re
-from typing import Optional, Match, Any, Dict
+import aiohttp
+from typing import Optional, Match
 from io import BytesIO
 from urllib.parse import urlparse
 
@@ -17,21 +18,24 @@ class BelarusHandler(BaseHandler):
     Асинхронный хендлер для получения данных с сайта Беларуси.
     """
 
-    async def retrieve(self, options: Dict[str, Any]) -> Optional[bytes]:
+    async def retrieve(
+        self,
+        user_agent: Optional[str],
+        proxy: Optional[str] = None,
+        proxy_auth: Optional[aiohttp.BasicAuth] = None,
+    ) -> Optional[bytes]:
         """
         Загружает страницу, извлекает ссылку на файл с помощью регулярного выражения и возвращает содержимое файла.
 
         Args:
-            options (Dict[str, Any]): Параметры, переданные из конфигурации.
+            user_agent (str): Заголовок User-Agent.
+            proxy (Optional[str]): URL прокси-сервера.
+            proxy_auth (Optional[aiohttp.BasicAuth]): Учетные данные для прокси.
 
         Returns:
             Optional[bytes]: Содержимое файла в байтах, если файл найден и доступен, иначе None.
         """
         page_url: str = "https://www.customs.gov.by/zashchita-prav-na-obekty-intellektualnoy-sobstvennosti"
-
-        proxy = options.get("proxy")
-        proxy_auth = options.get("proxy_auth")
-        user_agent = options.get("user_agent")
 
         logger.info(f"Запрашиваем страницу: {page_url}")
 
@@ -86,17 +90,26 @@ class BelarusHandler(BaseHandler):
 
         return file_content
 
-    async def process(self, options: Dict[str, Any]) -> Optional[DataFrame]:
+    async def process(
+        self,
+        user_agent: str,
+        proxy: Optional[str] = None,
+        proxy_auth: Optional[aiohttp.BasicAuth] = None,
+        correction: bool = False,
+    ) -> Optional[DataFrame]:
         """
         Получает последний доступный файл и обрабатывает его с помощью polars.
 
         Args:
-            options (Dict[str, Any]): Параметры, переданные из конфигурации.
+            user_agent (str): Заголовок User-Agent.
+            proxy (Optional[str]): URL прокси-сервера.
+            proxy_auth (Optional[aiohttp.BasicAuth]): Учетные данные для прокси.
+            correction (bool): Флаг включения/выключения коррекции.
 
         Returns:
             Optional[DataFrame]: DataFrame с данными из файла, если файл найден и обработан успешно, иначе None.
         """
-        data_bytes: Optional[bytes] = await self.retrieve(options)
+        data_bytes: Optional[bytes] = await self.retrieve(user_agent, proxy, proxy_auth)
         if data_bytes is None:
             logger.error("Не удалось получить данные последнего файла.")
             return None
@@ -106,12 +119,17 @@ class BelarusHandler(BaseHandler):
             # Чтение данных с использованием Polars
             df: DataFrame = pl.read_excel(
                 byte_stream,
-                engine="xlsx2csv",
-                read_options={
-                    "skip_rows": 3,
-                    "schema_overrides": {"№ п/п": pl.Utf8},
-                },
-            )[4:]
+                engine="calamine",
+                read_options={"skip_rows": 1},
+            )
+            new_columns = [
+                str(val) if val is not None else "UNKNOWN" for val in df.row(0)
+            ]
+
+            # Применяем новые заголовки и убираем первую строку
+            df = df.slice(2).rename(
+                {old: new for old, new in zip(df.columns, new_columns)}
+            )
 
             # Убираем пробелы из строковых колонок
             string_columns = [
