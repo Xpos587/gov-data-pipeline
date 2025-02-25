@@ -17,12 +17,12 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     """
-    Главная функция для запуска обработчиков и загрузки файлов на SFTP.
+    Главная функция для запуска обработчиков и загрузки файлов на FTP.
     """
     logger.info("Начало обработки...")
 
     if not settings.ftp:
-        logger.error("Настройки SFTP не найдены. Завершаем работу.")
+        logger.error("Настройки FTP не найдены. Завершаем работу.")
         return
 
     # Получаем результаты обработки от всех обработчиков
@@ -53,7 +53,7 @@ async def main() -> None:
             except Exception as e:
                 logger.error(f"Ошибка при обработке данных обработчика {name}: {e}")
     except Exception as e:
-        logger.error(f"Общая ошибка при загрузке на SFTP: {e}")
+        logger.error(f"Общая ошибка при загрузке на FTP: {e}")
 
     logger.info("Обработка завершена.")
 

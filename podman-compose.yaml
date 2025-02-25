@@ -2,11 +2,19 @@ services:
   gov-data-pipeline:
     build: .
     image: gov-data-pipeline
-    env_file:
-      - .env
+    env_file: .env # Основной файл с чувствительными данными
     environment:
-      BELARUS_ENABLED: true
-      # BELARUS_PROXY: "http://127.0.0.1:801"
-      KAZAKHSTAN_ENABLED: false
-      KYRGYZSTAN_ENABLED: false
-      KYRGYZSTAN_CORRECTION: true
+      #=== Настройки обработчиков ===
+      BELARUS_ENABLED: false # Активация модуля Беларуси (true/false)
+      # BELARUS_PROXY: "http://user:pass@proxy:port" # Прокси с авторизацией
+      # BELARUS_PROXY: "http://proxy:port" # Прокси без авторизации
+      BELARUS_CORRECTION: false # Автокоррекция данных (true/false)
+
+      KAZAKHSTAN_ENABLED: false # Отключение модуля Казахстана
+      # KAZAKHSTAN_USER_AGENT: "CustomAgent/1.1" # Кастомный User-Agent
+
+      KYRGYZSTAN_ENABLED: false # Отключение модуля Кыргызстана
+      KYRGYZSTAN_CORRECTION: true # Включение коррекции для Кыргызстана
+      #=== Прочие настройки ===
+      # FTP_REMOTE_DIR: "/backups" # Каталог для выгрузки на FTP
+      # OPENAI_IMAGE_MODEL: "gpt-4-turbo" # Смена модели для генерации изображений
