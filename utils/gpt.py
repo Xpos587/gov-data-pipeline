@@ -5,9 +5,8 @@ import base64
 import json
 import logging
 import asyncio
-import unicodedata
 from io import BytesIO
-from typing import Dict, List, Optional, Any, cast
+from typing import Dict, List, Optional
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
@@ -21,20 +20,13 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-IMAGE_MODEL = "llama-3.2-11b-vision-preview"
-BRAND_MODEL = "llama-3.1-8b-instant"
-CORRECT_MODEL = "llama-3.1-8b-instant"
-
 
 class BrandRecognitionResponse(BaseModel):
     english_samples: List[str] = Field(
-        ..., description="Samples of brand names in English (max 6)."
+        ..., description="Samples of brand names in English (max 4)."
     )
     russian_samples: List[str] = Field(
-        ..., description="Samples of brand names in Russian (max 6)."
-    )
-    original_text: str = Field(
-        ..., description="Original text where the brand is searched for."
+        ..., description="Samples of brand names in Russian (max 4)."
     )
 
 
@@ -46,13 +38,17 @@ class RowCorrectionResponse(BaseModel):
 
 def is_excluded(row_text: str) -> bool:
     """
-    Проверяет, содержит ли строка ключевые слова "исключён" или "исключен".
-    Игнорирует регистр и пробелы.
+    Проверяет, содержит ли строка слово "исключен" (или "исключён") как отдельное слово.
+    Игнорирует регистр, символ "ё" заменяет на "е" и допускает наличие произвольных пробелов между буквами.
+    Не воспринимает слова типа "исключение", "исключением" и т.д.
     """
-    # Нормализуем текст: удаляем пробелы, заменяем "ё" на "е", приводим к нижнему регистру
-    normalized_text = re.sub(r"\s+", "", row_text)  # Удаление всех пробелов
-    normalized_text = normalized_text.casefold().replace("ё", "е")
-    return "исключен" in normalized_text
+    # Приводим текст к нижнему регистру и заменяем "ё" на "е"
+    normalized_text = row_text.casefold().replace("ё", "е")
+    # Строим паттерн для слова "исключен" с допускаемыми пробелами между буквами
+    word = "исключен"
+    # Паттерн: перед словом не должно быть буквы, после слова – тоже (чтобы исключить расширенные формы)
+    pattern = r"(?<![а-я])" + r"\s*".join(list(word)) + r"(?![а-я])"
+    return re.search(pattern, normalized_text, flags=re.IGNORECASE) is not None
 
 
 async def image_to_base64(image_data: bytes) -> str:
@@ -72,65 +68,6 @@ async def image_to_base64(image_data: bytes) -> str:
 
     encoded = base64.b64encode(image_data).decode("utf-8")
     return f"data:image/png;base64,{encoded}"
-
-
-def clean_messages(
-    messages: List[ChatCompletionMessageParam],
-) -> List[ChatCompletionMessageParam]:
-    """
-    Очищает содержимое сообщений от нежелательных Unicode-символов.
-
-    Если значение ключа "content" — строка, удаляются все контрольные символы и нормализуются пробелы.
-    Если значение — список (например, для GPT Vision), то для каждого элемента,
-    если он представляет собой словарь с ключом "text", также очищается текст.
-    """
-    cleaned: List[ChatCompletionMessageParam] = []
-
-    for msg in messages:
-        # Создаём копию сообщения
-        new_msg: Dict[str, Any] = dict(msg)
-
-        content: Any = new_msg.get("content", None)
-
-        if isinstance(content, str):
-            # Удаляем контрольные символы (категория "C")
-            cleaned_text = "".join(
-                ch for ch in content if unicodedata.category(ch)[0] != "C"
-            )
-            # Нормализуем пробелы
-            cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
-            new_msg["content"] = cleaned_text
-
-        elif isinstance(content, list):
-            # Явно указываем, что content — это список неизвестных объектов
-            content_list: List[Any] = cast(List[Any], content)
-            new_content: List[Any] = []
-            for item in content_list:
-                if isinstance(item, dict) and "text" in item:
-                    # Приводим item к dict[str, Any]
-                    item_dict: Dict[str, Any] = cast(Dict[str, Any], item)
-                    text_val: str = str(item_dict.get("text", ""))
-
-                    # Удаляем контрольные символы и нормализуем пробелы
-                    text_val = "".join(
-                        ch for ch in text_val if unicodedata.category(ch)[0] != "C"
-                    )
-                    text_val = re.sub(r"\s+", " ", text_val).strip()
-
-                    # Создаём копию, чтобы изменить только "text"
-                    new_item: Dict[str, Any] = {}
-                    for key_item, val_item in item_dict.items():
-                        new_item[key_item] = val_item
-                    new_item["text"] = text_val
-                    new_content.append(new_item)
-                else:
-                    new_content.append(item)
-
-            new_msg["content"] = new_content
-
-        cleaned.append(cast(ChatCompletionMessageParam, new_msg))
-
-    return cleaned
 
 
 async def call_openai(
@@ -164,8 +101,6 @@ async def call_openai(
         ChatCompletion: Ответ от OpenAI Chat API.
     """
     # Очищаем сообщения перед отправкой запроса
-    messages = clean_messages(messages)
-
     delay: float = initial_delay
     for attempt in range(1, max_retries + 1):
         try:
@@ -210,27 +145,67 @@ async def call_openai(
     raise RuntimeError("Не удалось получить ответ.")
 
 
+async def recognize_image(client: AsyncOpenAI, base64_image: str) -> str:
+    """
+    Использует GPT Vision для распознавания текста из изображения.
+    """
+    response = await call_openai(
+        client,
+        model=settings.openai.image_model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "You must return ONLY the text found in the image."
+                            "No descriptions, no explanations, no formatting."
+                            "Just the raw text."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": base64_image},
+                    },
+                ],
+            },
+        ],
+        temperature=0.1,
+        max_tokens=64,
+    )
+    return response.choices[0].message.content or ""
+
+
 async def process_table(
     df: pl.DataFrame,
     brand_column: str,
     description_column: Optional[str] = None,
+    image_column: str = "Изображение",
     correction: bool = False,
 ) -> pl.DataFrame:
     """
-    Обрабатывает DataFrame, распознаёт бренды и корректирует каждую строку.
+    Обрабатывает DataFrame, распознаёт бренды, корректирует строки и обрабатывает изображения.
 
     1. Проверяет, не содержит ли строка ключевые слова "исключён"/"исключен".
        Если содержит — помечает строку, добавляя поле "Исключено = 'Да'" и пропускает дальнейшую обработку.
 
-    2. Если строка не исключена, вызывает `recognize_brand` для указанного столбца с брендом и, при наличии, столбца с описанием.
+    2. Если строка не исключена:
+       - Если столбец с названием бренда пуст, но есть изображение, распознаёт текст из изображения
+         и сохраняет его в столбце бренда с припиской "(RECOG)".
+       - Если бренд указан, но есть изображение, оставляет данные без изменений.
+
+    3. Вызывает `recognize_brand` для указанного столбца с брендом и, при наличии, столбца с описанием.
        Заменяет значение бренда на (original_text + english_samples + russian_samples).
 
-    3. Вызывает `correct_row` для итоговых данных и сохраняет результат.
+    4. Вызывает `correct_row` для итоговых данных и сохраняет результат.
 
     Args:
         df (pl.DataFrame): Исходный DataFrame с данными.
         brand_column (str): Название столбца, содержащего торговую марку.
         description_column (Optional[str]): Название столбца с описанием фирмы для улучшения распознавания.
+        image_column (str): Название столбца с изображением в формате base64.
+        correction (bool): Флаг включения корректировки строки.
 
     Returns:
         pl.DataFrame: Обработанный DataFrame с полем 'Исключено' и/или обновлёнными данными.
@@ -262,28 +237,30 @@ async def process_table(
         "\n"
         "For input: 'Найки'\n"
         "{\n"
-        '    "original_text": "Найки",\n'
         '    "english_samples": ["Nike", "Naiki", "NIKE", "Naykee"],\n'
         '    "russian_samples": ["Найки", "Найк"]\n'
         "}\n"
         "\n"
         "For input: 'Адидас спорт'\n"
         "{\n"
-        '    "original_text": "Адидас спорт",\n'
         '    "english_samples": ["Adidas", "Adidas Sport"],\n'
         '    "russian_samples": ["Адидас", "Адидас Спорт"]\n'
         "}\n"
         "\n"
+        "For input: 'DEERMA'\n"
+        "{\n"
+        '    "english_samples": ["Dirma", "Derma"],\n'
+        '    "russian_samples": ["Дирма", "Дерма", "Деерма"]\n'
+        "}\n"
+        "\n"
         "For input: 'Samsung Electronics Co., Ltd.'\n"
         "{\n"
-        '    "original_text": "Samsung Electronics Co., Ltd.",\n'
         '    "english_samples": ["Samsung", "Samsung Electronics"],\n'
         '    "russian_samples": ["Самсунг", "Самсунг Электроникс"]\n'
         "}\n"
         "\n"
         "For input: 'ООО Рога и Копыта'\n"
         "{\n"
-        '    "original_text": "ООО Рога и Копыта",\n'
         '    "english_samples": ["Roga i Kopyta LLC"],\n'
         '    "russian_samples": ["Рога и Копыта"]\n'
         "}\n"
@@ -294,80 +271,44 @@ async def process_table(
         "No markdown fences. No extra text. Strictly output valid JSON or return an empty JSON object."
     )
 
-    row_system_prompt: str = (
-        "Correct the table row. Respond strictly in JSON format with the key 'corrected_row' following the provided schema:\n"
-        f"{json.dumps(RowCorrectionResponse.model_json_schema(), indent=2)}"
-    )
-
-    async def recognize_image(base64_image: str) -> str:
-        """
-        Использует GPT Vision для распознавания текста из изображения.
-        """
-        response = await call_openai(
-            client,
-            model=IMAGE_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "You must return ONLY the text found in the image."
-                                "No descriptions, no explanations, no formatting."
-                                "Just the raw text."
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": base64_image},
-                        },
-                    ],
-                },
-            ],
-            temperature=0.1,
-            max_tokens=64,
-        )
-        return response.choices[0].message.content or ""
-
-    async def recognize_brand(
-        text: str, description: Optional[str] = None, row_idx: int = 0
+    async def gen_brand_samples(
+        prompt: str, description: Optional[str] = None, row_idx: int = 0
     ) -> BrandRecognitionResponse:
         """
         Распознаёт бренд, возвращая структуру BrandRecognitionResponse.
         Если найдена base64-строка изображения, распознаёт и заменяет её на извлечённый текст.
         В случае, если description_column указан, добавляет его текст к тексту для лучшего распознавания.
         """
-        # Ищем в тексте возможную строку data:image/png;base64,....
-        pattern = r"data:image/png;base64,[A-Za-z0-9+/=]+"
-        match = re.search(pattern, text)
-        if match:
-            base64_str = match.group(0)
-            recognized = await recognize_image(base64_str)
-            # Заменяем base64 в тексте на извлечённый
-            text = text.replace(base64_str, recognized)
-
         # Если описание присутствует, добавляем его
         if description:
-            text = f"{text}. Description: {description}"
+            prompt = f"{prompt}. Description: {description}"
 
-        # Убираем все цифры и нормализуем пробелы
-        text = re.sub(r"\d+", "", text)
-        text = re.sub(r"\s+", " ", text).strip()
+        # Убираем все цифры
+        prompt = re.sub(r"\d+", "", prompt)
+
+        # Нормализуем пробелы
+        prompt = re.sub(r"\s+", " ", prompt).strip()
+
+        # Удаляем токены, состоящие только из спецсимволов
+        prompt = " ".join(
+            token
+            for token in prompt.split()
+            if not re.fullmatch(r"[!\"#$%&'()*+,\-./:;<=>?@\[\]^_`{|}~]+", token)
+        )
 
         # Ограничиваем длину текста для GPT
         max_length = 2000
-        if len(text) > max_length:
-            text = text[:max_length] + "..."
+        if len(prompt) > max_length:
+            prompt = prompt[:max_length] + "..."
 
-        logger.info(f"Запрос (Строка {row_idx}): {text}")
+        logger.info(f"Запрос (Строка {row_idx}): {prompt}")
 
         response = await call_openai(
             client,
-            model=BRAND_MODEL,
+            model=settings.openai.brand_model,
             messages=[
                 {"role": "system", "content": brand_system_prompt},
-                {"role": "user", "content": text},
+                {"role": "user", "content": prompt},
             ],
             temperature=0.3,
             max_tokens=256,
@@ -386,6 +327,7 @@ async def process_table(
                     f"[Строка {row_idx}] 'english_samples' отсутствует в ответе!"
                 )
                 data["english_samples"] = []
+
             if "russian_samples" not in data:
                 logger.warning(
                     f"[Строка {row_idx}] 'russian_samples' отсутствует в ответе!"
@@ -397,19 +339,23 @@ async def process_table(
         except Exception as e:
             logger.error(f"[Строка {row_idx}] Ошибка обработки JSON-ответа: {e}")
             logger.error(f"[Строка {row_idx}] Некорректный ответ: {raw_text}")
-            return BrandRecognitionResponse(
-                english_samples=[], russian_samples=[], original_text=text
-            )
+            return BrandRecognitionResponse(english_samples=[], russian_samples=[])
 
     async def correct_row(row_data: Dict[str, Optional[str]]) -> RowCorrectionResponse:
         """
         Корректирует строку, возвращая структуру RowCorrectionResponse.
         """
+
+        row_system_prompt: str = (
+            "Correct the table row. Respond strictly in JSON format with the key 'corrected_row' following the provided schema:\n"
+            f"{json.dumps(RowCorrectionResponse.model_json_schema(), indent=2)}"
+        )
+
         logger.debug(f"Запрос: {json.dumps(row_data, ensure_ascii=False)}")
 
         response = await call_openai(
             client,
-            model=CORRECT_MODEL,
+            model=settings.openai.correct_model,
             messages=[
                 {"role": "system", "content": row_system_prompt},
                 {
@@ -439,41 +385,69 @@ async def process_table(
     # Перебираем строки DataFrame
     for idx, row in enumerate(df.iter_rows(named=True), start=1):
         row_dict: Dict[str, Optional[str]] = dict(row)
-        logger.info(f"=== Обрабатываем строку {idx}: {row_dict}")
+
+        # Улучшаем вывод для логгера
+        modified_row = {}
+        for key, val in row_dict.items():
+            if key == image_column and isinstance(val, str) and len(val) > 100:
+                modified_row[key] = val[:50] + " ... " + val[-50:]
+            else:
+                modified_row[key] = val
+        logger.info(f"=== Обрабатываем строку {idx}: {modified_row}")
 
         # 1) Проверяем, исключена ли ТМ (анализируем всю строку)
         combined_text = " ".join(
             str(val) for val in row_dict.values() if val is not None
         )
         if is_excluded(combined_text):
-            logger.info(f"[Строка {idx}] Исключена (содержит 'исключён'). Пропускаем.")
+            logger.info(f"[Строка {idx}] Исключена. Пропускаем.")
             row_dict["Исключено"] = "Да"
             processed_rows.append({k: (v or "") for k, v in row_dict.items()})
-            continue  # 🚀 Теперь строка точно пропускается без вызова GPT!
+            continue  # Строка пропускается без вызова GPT!
 
-        # 2) Обрабатываем только столбец brand_column (если не исключено)
+        # 2) Обработка столбца с изображением
         brand_val = row_dict.get(brand_column)
-        description_val = (
-            row_dict.get(description_column) if description_column else None
-        )
+        image_val = row_dict.get(image_column)
 
+        if not brand_val and image_val:
+            try:
+                # Распознаём текст из изображения
+                recognized_text = await recognize_image(client, image_val)
+                if recognized_text:
+                    # Добавляем распознанный текст в столбец бренда с припиской "(RECOG)"
+                    row_dict[brand_column] = f"{recognized_text} (RECOG)"
+                    logger.info(
+                        f"[Строка {idx}] Распознан бренд из изображения: {recognized_text}"
+                    )
+            except Exception as e:
+                logger.error(f"[Строка {idx}] Ошибка распознавания изображения: {e}")
+
+        # 3) Распознаём бренд
+        brand_val = row_dict.get(
+            brand_column
+        )  # Обновляем значение бренда после обработки изображения
         if isinstance(brand_val, str) and brand_val.strip():
-            brand_resp = await recognize_brand(brand_val, description_val, row_idx=idx)
+            # Удаляем приписку "(RECOG)", если она есть, чтобы не передавать её в модель
+            plain_brand = brand_val.replace(" (RECOG)", "").strip()
+            description_val = (
+                row_dict.get(description_column) if description_column else None
+            )
+            brand_resp = await gen_brand_samples(
+                plain_brand, description_val, row_idx=idx
+            )
 
-            # Формируем итоговое значение
-            combined_brand_info = " ".join(
-                [
-                    brand_resp.original_text,
-                    ", ".join(brand_resp.english_samples),
-                    ", ".join(brand_resp.russian_samples),
-                ]
-            ).strip()
-            row_dict[brand_column] = combined_brand_info
+            # Формируем итоговые столбцы
+            row_dict["Вариации бренда на англ. языке"] = ", ".join(
+                brand_resp.english_samples
+            )
+            row_dict["Вариации бренда на рус. языке"] = ", ".join(
+                brand_resp.russian_samples
+            )
 
-        # 3) Добавляем 'Исключено' = 'Нет'
+        # 4) Добавляем 'Исключено' = 'Нет'
         row_dict["Исключено"] = "Нет"
 
-        # 4) Коррекция строки (если включена)
+        # 5) Коррекция строки (если включена)
         if correction:
             try:
                 corrected_resp = await correct_row(row_dict)

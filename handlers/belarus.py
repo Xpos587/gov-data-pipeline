@@ -9,6 +9,7 @@ import polars as pl
 from polars import DataFrame
 
 from .base import BaseHandler
+from utils.gpt import process_table
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,11 @@ class BelarusHandler(BaseHandler):
     Асинхронный хендлер для получения данных с сайта Беларуси.
     """
 
+    IMAGE_COLUMN_NAME: str = "Вид объекта интеллектуальной собственности, его наименование (описание, изображение)"  # Название столбца, где потенциально может быть ТМ с изображением
+    TRADEMARK_COLUMN_NAME: str = "Вид объекта интеллектуальной собственности, его наименование (описание, изображение)"
+    DESCRIPTION_COLUMN_NAME: str = "Наименование (описание) товаров, содержащих объект интеллектуальной собственности"
+    ROW_OFFSET: int = 2
+
     async def retrieve(
         self,
         user_agent: Optional[str],
@@ -26,14 +32,6 @@ class BelarusHandler(BaseHandler):
     ) -> Optional[bytes]:
         """
         Загружает страницу, извлекает ссылку на файл с помощью регулярного выражения и возвращает содержимое файла.
-
-        Args:
-            user_agent (str): Заголовок User-Agent.
-            proxy (Optional[str]): URL прокси-сервера.
-            proxy_auth (Optional[aiohttp.BasicAuth]): Учетные данные для прокси.
-
-        Returns:
-            Optional[bytes]: Содержимое файла в байтах, если файл найден и доступен, иначе None.
         """
         page_url: str = "https://www.customs.gov.by/zashchita-prav-na-obekty-intellektualnoy-sobstvennosti"
 
@@ -56,7 +54,7 @@ class BelarusHandler(BaseHandler):
             logger.error(f"Ошибка декодирования страницы: {e}")
             return None
 
-        # Регулярное выражение для поиска ссылки на файл .xlsx
+        # Ищем ссылку на .xlsx
         pattern: str = r"/uploads/reestr-is/Reestr\d{6}\.xlsx"
         match: Optional[Match[str]] = re.search(pattern, page_text)
 
@@ -64,15 +62,13 @@ class BelarusHandler(BaseHandler):
             logger.warning("Ссылка на файл не найдена на странице.")
             return None
 
-        # Извлечение поддомена из page_url
         parsed_url = urlparse(page_url)
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
-        # Формирование полного URL файла
         file_url: str = base_url + match.group(0)
         logger.info(f"Найдена ссылка на файл: {file_url}")
 
-        # Загружаем файл по найденной ссылке
+        # Загружаем Excel-файл
         file_content: Optional[bytes] = await self.fetch(
             url=file_url,
             headers={
@@ -98,51 +94,41 @@ class BelarusHandler(BaseHandler):
         correction: bool = False,
     ) -> Optional[DataFrame]:
         """
-        Получает последний доступный файл и обрабатывает его с помощью polars.
-
-        Args:
-            user_agent (str): Заголовок User-Agent.
-            proxy (Optional[str]): URL прокси-сервера.
-            proxy_auth (Optional[aiohttp.BasicAuth]): Учетные данные для прокси.
-            correction (bool): Флаг включения/выключения коррекции.
-
-        Returns:
-            Optional[DataFrame]: DataFrame с данными из файла, если файл найден и обработан успешно, иначе None.
+        Получает последний доступный файл и обрабатывает его с помощью polars и GPT.
         """
         data_bytes: Optional[bytes] = await self.retrieve(user_agent, proxy, proxy_auth)
         if data_bytes is None:
             logger.error("Не удалось получить данные последнего файла.")
             return None
 
-        try:
-            byte_stream: BytesIO = BytesIO(data_bytes)
-            # Чтение данных с использованием Polars
-            df: DataFrame = pl.read_excel(
-                byte_stream,
-                engine="calamine",
-                read_options={"skip_rows": 1},
-            )
-            new_columns = [
-                str(val) if val is not None else "UNKNOWN" for val in df.row(0)
-            ]
+        byte_stream: BytesIO = BytesIO(data_bytes)
+        # Чтение Excel
+        df: DataFrame = pl.read_excel(
+            byte_stream,
+            engine="calamine",
+            read_options={"skip_rows": 1},  # При необходимости корректируем
+        )
+        # Считываем первую строку как будущие заголовки
+        new_columns = [str(val) if val is not None else "UNKNOWN" for val in df.row(0)]
 
-            # Применяем новые заголовки и убираем первую строку
-            df = df.slice(2).rename(
-                {old: new for old, new in zip(df.columns, new_columns)}
-            )
+        # Применяем заголовки и убираем первую строку
+        df = df.slice(2).rename({old: new for old, new in zip(df.columns, new_columns)})
 
-            # Убираем пробелы из строковых колонок
-            string_columns = [
-                col for col, dtype in df.schema.items() if dtype == pl.Utf8
-            ]
-            df = df.with_columns(
-                [pl.col(col).str.strip_chars() for col in string_columns]
-            )
+        # Удаляем лишние пробелы в строковых столбцах
+        string_columns = [col for col, dtype in df.schema.items() if dtype == pl.Utf8]
+        df = df.with_columns([pl.col(col).str.strip_chars() for col in string_columns])
 
-            logger.info(
-                f"Данные успешно загружены и обработаны с помощью polars: {df.shape}"
-            )
-            return df
-        except Exception as e:
-            logger.error(f"Ошибка при обработке данных с помощью polars: {e}")
-            return None
+        # Предобработка сырых изображений
+        df = await self.process_excel_images(df, byte_stream)
+
+        logger.info(f"Данные успешно загружены и предобработаны: {df.shape}")
+
+        df = await process_table(
+            df,
+            brand_column=self.TRADEMARK_COLUMN_NAME,
+            description_column=self.DESCRIPTION_COLUMN_NAME,
+            correction=correction,
+        )
+
+        logger.info(f"Формирование таблицы завершено: {df.shape}")
+        return df

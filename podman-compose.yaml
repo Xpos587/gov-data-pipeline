@@ -1,0 +1,12 @@
+services:
+  gov-data-pipeline:
+    build: .
+    image: gov-data-pipeline
+    env_file:
+      - .env
+    environment:
+      BELARUS_ENABLED: true
+      # BELARUS_PROXY: "http://127.0.0.1:801"
+      KAZAKHSTAN_ENABLED: false
+      KYRGYZSTAN_ENABLED: false
+      KYRGYZSTAN_CORRECTION: true
