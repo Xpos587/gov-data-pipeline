@@ -16,7 +16,7 @@ class FTPConfig(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = 21
-    user: str = "sftp"
+    user: str = "ftp"
     passwd: SecretStr = SecretStr("default_pass")
     remote_dir: str = "/"
 
@@ -120,4 +120,4 @@ class AppSettings(BaseSettings):
 settings = AppSettings()
 
 if __name__ == "__main__":
-  print(settings.model_dump_json(indent=2))
+    print(settings.model_dump_json(indent=2))
