@@ -1,9 +1,8 @@
 import re
 import logging
 import unicodedata
-from typing import Optional, Match, Dict, List, Tuple
+from typing import Optional, Match
 
-from openpyxl import load_workbook
 from io import BytesIO
 
 import aiohttp
@@ -11,7 +10,7 @@ import polars as pl
 from polars import DataFrame
 
 from .base import BaseHandler
-from utils.gpt import image_to_base64, process_table
+from utils.gpt import process_table
 
 logger = logging.getLogger(__name__)
 
@@ -124,177 +123,72 @@ class KazakhstanHandler(BaseHandler):
 
         byte_stream = BytesIO(data_bytes)
 
-        try:
-            # ВАЖНО: используется skip_rows=4, а потом [1:] => примерно 5 строк пропущено
-            df: DataFrame = pl.read_excel(
-                byte_stream,
-                engine="calamine",
-                read_options={"skip_rows": 3},
-            )
-            # Берем первую строку как заголовки и приводим все значения к строкам
-            new_columns = [
-                str(val) if val is not None else "UNKNOWN" for val in df.row(0)
-            ]
+        # ВАЖНО: используется skip_rows=4, а потом [1:] => примерно 5 строк пропущено
+        df: DataFrame = pl.read_excel(
+            byte_stream,
+            engine="calamine",
+            read_options={"skip_rows": 3},
+        )
+        # Берем первую строку как заголовки и приводим все значения к строкам
+        new_columns = [str(val) if val is not None else "UNKNOWN" for val in df.row(0)]
 
-            # Применяем новые заголовки и убираем первую строку
-            df = df.slice(2).rename(
-                {old: new for old, new in zip(df.columns, new_columns)}
-            )
+        # Применяем новые заголовки и убираем первую строку
+        df = df.slice(2).rename({old: new for old, new in zip(df.columns, new_columns)})
 
-            # Функция для рефакторинга названий столбцов
-            def clean_column_name(name: str) -> str:
-                name = name.strip()
-                name = re.sub(r"Наименова\s*ние", "Наименование", name)
-                name = name.replace("/", " или ")
-                name = name.replace("\n", " ")
-                name = re.sub(r"\s{2,}", " ", name)
-                name = "".join(
-                    char for char in name if char.isprintable()
-                )  # удаляет невидимые символы
-                return name
+        # Функция для рефакторинга названий столбцов
+        def clean_column_name(name: str) -> str:
+            name = name.strip()
+            name = re.sub(r"Наименова\s*ние", "Наименование", name)
+            name = name.replace("/", " или ")
+            name = name.replace("\n", " ")
+            name = re.sub(r"\s{2,}", " ", name)
+            name = "".join(
+                char for char in name if char.isprintable()
+            )  # удаляет невидимые символы
+            return name
 
-            # Приводим названия столбцов в порядок
-            df = df.rename({col: clean_column_name(col) for col in df.columns})
+        # Приводим названия столбцов в порядок
+        df = df.rename({col: clean_column_name(col) for col in df.columns})
 
-            # Функция очистки текста от не-ASCII символов и приведения к нормальной форме
-            def clean_text(text: Optional[str]) -> str:
-                if text is None:
-                    return ""
+        # Функция очистки текста от не-ASCII символов и приведения к нормальной форме
+        def clean_text(text: Optional[str]) -> str:
+            if text is None:
+                return ""
 
-                # Убираем пробелы, переносы строк и нормализуем Unicode
-                text = text.strip().replace("\n", " ").replace("\r", "")
-                text = re.sub(r"\s{2,}", " ", text)  # удаляем двойные пробелы
+            # Убираем пробелы, переносы строк и нормализуем Unicode
+            text = text.strip().replace("\n", " ").replace("\r", "")
+            text = re.sub(r"\s{2,}", " ", text)  # удаляем двойные пробелы
 
-                # Нормализуем текст (NFKC: убирает странные комбинации символов)
-                text = unicodedata.normalize("NFKC", text)
+            # Нормализуем текст (NFKC: убирает странные комбинации символов)
+            text = unicodedata.normalize("NFKC", text)
 
-                # Удаляем все не-ASCII символы, оставляя кириллицу, латиницу и цифры
-                text = re.sub(r"[^\w\s\.,;:№\-]", "", text)
+            # Удаляем все не-ASCII символы, оставляя кириллицу, латиницу и цифры
+            text = re.sub(r"[^\w\s\.,;:№\-]", "", text)
 
-                return text
+            return text
 
-            # Очищаем все текстовые столбцы
-            string_columns = [
-                col for col, dtype in df.schema.items() if dtype == pl.Utf8
-            ]
-            df = df.with_columns(
-                [
-                    pl.col(col).map_elements(
-                        clean_text, return_dtype=pl.Utf8, skip_nulls=False
-                    )
-                    for col in string_columns
-                ]
-            )
-
-            logger.info(
-                f"Данные успешно загружены и обработаны с помощью polars: {df.shape}"
-            )
-
-            # Предобработка сырых изображений
-            df = await self.preprocess_images(df, byte_stream)
-
-            # Обработка изображений при помощи gpt
-            df = await process_table(
-                df,
-                brand_column=self.TRADEMARK_COLUMN_NAME,
-                description_column=self.DESCRIPTION_COLUMN_NAME,
-                correction=correction,
-            )
-
-            return df
-
-        except Exception as e:
-            logger.error(f"Ошибка при обработке данных с помощью polars: {e}")
-            return None
-
-    async def preprocess_images(self, df: DataFrame, byte_stream: BytesIO) -> DataFrame:
-        """
-        Предобрабатывает сырые изображения, учитывая смещение строк (ROW_OFFSET),
-        а также возможное частичное смещение в пределах ячейки.
-        """
-        logger.info("Начинаем предобработку сырых изображений.")
-
-        if self.IMAGE_COLUMN_NAME not in df.columns:
-            logger.warning(f"Столбец '{self.IMAGE_COLUMN_NAME}' не найден в DataFrame.")
-            logger.warning(df.columns)
-            return df
-
-        logger.info(f"Обработка изображений в столбце: {self.IMAGE_COLUMN_NAME}")
-
-        # Загружаем книгу и лист
-        try:
-            workbook = load_workbook(byte_stream, data_only=True)
-            sheet = workbook.active
-        except Exception as e:
-            logger.error(f"Ошибка загрузки книги Excel: {e}")
-            return df
-
-        images_info: Dict[Tuple[int, int], List[str]] = {}
-
-        for image in getattr(sheet, "_images", []):
-            try:
-                # Основные координаты (целое число)
-                base_row = image.anchor._from.row  # 0-based
-                base_col = image.anchor._from.col  # 0-based
-
-                # Частичное смещение внутри ячейки (кол-во пикселей)
-                rowOff = image.anchor._from.rowOff  # int (пиксели)
-                _colOff = image.anchor._from.colOff  # int (пиксели)
-
-                # Ниже — очень упрощённая логика,
-                # можно подбирать пороги и корректнее учитывать высоту строки
-                # или брать anchor._to, но для примера:
-                # Если rowOff > 10000, допустим, сдвигаемся на 1 строку вниз
-                additional_row = 1 if rowOff > 10000 else 0
-
-                # Преобразуем openpyxl индексы к "человеческим"
-                # +1 потому что row,col 0-based в anchor, а Excel обычно 1-based
-                excel_row = base_row + 1 + additional_row
-                excel_col = base_col + 1
-
-                # Конвертируем в base64
-                img_data = BytesIO(image._data())
-                base64_image = await image_to_base64(img_data.getvalue())
-
-                # Сохраняем
-                if (excel_row, excel_col) not in images_info:
-                    images_info[(excel_row, excel_col)] = []
-                images_info[(excel_row, excel_col)].append(base64_image)
-
-            except Exception as e:
-                logger.warning(f"Ошибка обработки изображения: {e}")
-                continue
-
-        if not images_info:
-            logger.warning("Изображения не найдены в файле.")
-            return df
-
-        logger.info(f"Найдено {len(images_info)} изображений для обработки.")
-        updated_column: List[str] = df[self.IMAGE_COLUMN_NAME].to_list()
-
-        for (excel_row, excel_col), base64_list in images_info.items():
-            # Учитываем смещение строк
-            df_row = excel_row - self.ROW_OFFSET
-            df_row -= 1  # если хотим, чтобы строка 6 Excel -> индекс 0 DataFrame
-
-            if df_row < 0 or df_row >= df.height:
-                logger.warning(
-                    f"Картинка (Excel row={excel_row}, col={excel_col}) -> df_row={df_row}, вне диапазона DataFrame."
+        # Очищаем все текстовые столбцы
+        string_columns = [col for col, dtype in df.schema.items() if dtype == pl.Utf8]
+        df = df.with_columns(
+            [
+                pl.col(col).map_elements(
+                    clean_text, return_dtype=pl.Utf8, skip_nulls=False
                 )
-                continue
+                for col in string_columns
+            ]
+        )
 
-            # Получаем текущий текст из столбца
-            current_text = updated_column[df_row]
+        # Предобработка сырых изображений
+        df = await self.process_excel_images(df, byte_stream)
 
-            # Дополняем Base64-строками
-            new_text = (current_text + " " + " ".join(base64_list)).strip()
-            updated_column[df_row] = new_text
+        logger.info(f"Данные успешно загружены и предобработаны: {df.shape}")
 
-            logger.debug(
-                f"Обновлена ячейка DataFrame (row={df_row}) для Excel-строки={excel_row} col={excel_col}."
-            )
+        df = await process_table(
+            df,
+            brand_column=self.TRADEMARK_COLUMN_NAME,
+            description_column=self.DESCRIPTION_COLUMN_NAME,
+            correction=correction,
+        )
 
-        df = df.with_columns(pl.Series(self.IMAGE_COLUMN_NAME, updated_column))
-        logger.info("Предобработка изображений завершена (учтено смещение строк).")
-
+        logger.info(f"Формирование таблицы завершено: {df.shape}")
         return df

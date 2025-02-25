@@ -1,9 +1,12 @@
 import aiohttp
 import logging
+from io import BytesIO
 from types import TracebackType
-from typing import Optional, Union, Dict, Type, Any
-from polars import DataFrame
+from typing import Optional, Union, Dict, Type, Any, Tuple, List
 from abc import ABC, abstractmethod
+from openpyxl import load_workbook
+from utils.gpt import image_to_base64
+import polars as pl
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +175,7 @@ class BaseHandler(ABC):
         proxy: Optional[str] = None,
         proxy_auth: Optional[aiohttp.BasicAuth] = None,
         correction: bool = False,
-    ) -> Optional[DataFrame]:
+    ) -> Optional[pl.DataFrame]:
         """
         Абстрактный метод, который должен быть реализован в дочерних классах.
 
@@ -193,3 +196,79 @@ class BaseHandler(ABC):
             Обработанные данные (DataFrame) или None, если что-то пошло не так.
         """
         pass
+
+    async def process_excel_images(
+        self,
+        df: pl.DataFrame,
+        byte_stream: BytesIO,
+    ) -> pl.DataFrame:
+        """
+        Предобрабатывает изображения в Excel, извлекая Base64-строки и помещая их в новый столбец.
+        Оригинальный столбец с текстом остается без изменений.
+
+        :param df: Исходный DataFrame.
+        :param byte_stream: Поток байтов Excel-файла.
+        :param column_name: Название столбца, по которому определяется расположение строк для изображений.
+        :return: Обновленный DataFrame с дополнительным столбцом, содержащим Base64-строки изображений.
+        """
+        logger.info(
+            f"Начинаем предобработку изображений для столбца: {self.IMAGE_COLUMN_NAME}..."
+        )
+
+        if self.IMAGE_COLUMN_NAME not in df.columns:
+            logger.warning(f"Столбец '{self.IMAGE_COLUMN_NAME}' не найден.")
+            return df
+
+        try:
+            workbook = load_workbook(byte_stream, data_only=True)
+            sheet = workbook.active
+        except Exception as e:
+            logger.error(f"Ошибка загрузки книги Excel: {e}")
+            return df
+
+        images_info: Dict[Tuple[int, int], List[str]] = {}
+
+        for image in getattr(sheet, "_images", []):
+            try:
+                base_row: int = image.anchor._from.row  # 0-based
+                base_col: int = image.anchor._from.col  # 0-based
+                row_off: int = image.anchor._from.rowOff
+                additional_row: int = 1 if row_off > 10000 else 0
+
+                excel_row: int = base_row + 1 + additional_row
+                excel_col: int = base_col + 1
+
+                img_data = BytesIO(image._data())
+                base64_image: str = await image_to_base64(img_data.getvalue())
+
+                key: Tuple[int, int] = (excel_row, excel_col)
+                images_info.setdefault(key, []).append(base64_image)
+            except Exception as e:
+                logger.warning(f"Ошибка при обработке изображения: {e}")
+                continue
+
+        if not images_info:
+            logger.info("Изображений не обнаружено или они отсутствуют.")
+            return df
+
+        logger.info(f"Найдено {len(images_info)} встраиваемых изображений.")
+
+        # Создаем новый столбец для Base64-строк изображений.
+        new_column: List[str] = ["" for _ in range(df.height)]
+
+        for (excel_row, excel_col), base64_list in images_info.items():
+            df_row: int = (
+                excel_row - self.ROW_OFFSET - 1
+            )  # Преобразуем Excel-индекс в индекс DataFrame
+            if df_row < 0 or df_row >= df.height:
+                logger.warning(
+                    f"Изображение (Excel row={excel_row}, col={excel_col}) -> df_row={df_row} вне диапазона."
+                )
+                continue
+            # В новом столбце только Base64-строки, без дополнительного текста.
+            new_text: str = " ".join(base64_list).strip()
+            new_column[df_row] = new_text
+
+        df = df.with_columns(pl.Series("Изображение", new_column))
+        logger.info("Предобработка изображений завершена.")
+        return df
